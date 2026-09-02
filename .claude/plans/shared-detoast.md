@@ -116,6 +116,14 @@ candidates the eflags rule denies so its value can be judged with numbers.
   blocks elsewhere.
 - Throwaway decider (all toastable attributes) on the base: every Phase 1 win case
   reaches its target, all guards hold, UPDATE keeps its toast pointer.
+- ExecInitScanTupleSlot is also called by Agg, Sort, Material, Memoize, Group,
+  WindowAgg and IncrementalSort, whose states embed a ScanState while their Plan is
+  not a Scan. The base now checks IsScanPlan() first; found because variant B read
+  its Scan field past the end of an Agg node and crashed at EXPLAIN time (2026-09-03).
+- set_plan_refs returns early for SubqueryScan (set_subqueryscan_references), so a
+  plan-time decider has to hook that path separately; guard case 9 caught it.
+- pull_multi_detoast_attrs() lives in optimizer/util/clauses.c and is shared by both
+  deciders; the race therefore measures only when the walk runs.
 
 ## Phases
 
