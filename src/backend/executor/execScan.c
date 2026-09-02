@@ -228,7 +228,8 @@ ExecScanPredetoastAttrs(ScanState *node, TupleDesc tupdesc, int eflags)
 	Bitmapset  *vetoed = NULL;
 	ListCell   *lc;
 
-	if (!shared_detoast || tupdesc == NULL)
+	/* Agg, Sort and others embed a ScanState too; only real scans qualify */
+	if (!shared_detoast || tupdesc == NULL || !IsScanPlan(plan))
 		return NULL;
 
 	candidates = ExecScanPredetoastCandidates(node, tupdesc);
