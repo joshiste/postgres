@@ -999,6 +999,8 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 	 * tree.  This opens files, allocates storage and leaves us ready to start
 	 * processing tuples.
 	 */
+	if (!IsParallelWorker())
+		eflags |= EXEC_FLAG_GRANT_ROW_CONSUMER;
 	planstate = ExecInitNode(plan, estate, eflags);
 
 	/*

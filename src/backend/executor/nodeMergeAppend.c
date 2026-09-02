@@ -142,7 +142,7 @@ ExecInitMergeAppend(MergeAppend *node, EState *estate, int eflags)
 	{
 		Plan	   *initNode = (Plan *) list_nth(node->mergeplans, i);
 
-		mergeplanstates[j++] = ExecInitNode(initNode, estate, eflags);
+		mergeplanstates[j++] = ExecInitNode(initNode, estate, EXEC_PASS_ROW_CONSUMER(eflags));
 	}
 
 	/*
