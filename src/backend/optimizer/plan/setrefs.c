@@ -1347,6 +1347,15 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 	}
 
 	/*
+	 * For scan nodes, record which scan-slot attributes more than one of the
+	 * (now final) expressions would detoast, so the executor can detoast them
+	 * once per row without walking the expressions again at every start.
+	 */
+	if (IsScanPlan(plan))
+		((Scan *) plan)->predetoast_attrs =
+			pull_multi_detoast_attrs(plan->targetlist, plan->qual);
+
+	/*
 	 * Now recurse into child plans, if any
 	 *
 	 * NOTE: it is essential that we recurse into child plans AFTER we set
@@ -1484,6 +1493,9 @@ set_subqueryscan_references(PlannerInfo *root,
 		plan->scan.plan.qual =
 			fix_scan_list(root, plan->scan.plan.qual,
 						  rtoffset, NUM_EXEC_QUAL((Plan *) plan));
+		plan->scan.predetoast_attrs =
+			pull_multi_detoast_attrs(plan->scan.plan.targetlist,
+									 plan->scan.plan.qual);
 
 		result = (Plan *) plan;
 	}

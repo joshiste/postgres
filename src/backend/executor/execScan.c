@@ -164,13 +164,12 @@ bool		shared_detoast = true;
 
 /*
  * Attributes of this scan node's slot that several of its expressions would
- * detoast.  This is the decision point that the executor-side and planner-side
- * variants replace; the base returns none, so nothing changes yet.
+ * detoast, as recorded by the planner in set_plan_refs().
  */
 static Bitmapset *
 ExecScanPredetoastCandidates(ScanState *node, TupleDesc tupdesc)
 {
-	return NULL;
+	return ((Scan *) node->ps.plan)->predetoast_attrs;
 }
 
 /*

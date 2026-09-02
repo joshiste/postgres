@@ -542,6 +542,13 @@ typedef struct Scan
 	Plan		plan;
 	/* relid is index into the range table */
 	Index		scanrelid;
+
+	/*
+	 * scan-slot attributes that several of this node's expressions detoast;
+	 * the executor may detoast these once per row in place (see
+	 * ExecScanPredetoastAttrs)
+	 */
+	Bitmapset  *predetoast_attrs;
 } Scan;
 
 /*
