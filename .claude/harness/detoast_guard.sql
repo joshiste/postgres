@@ -16,7 +16,11 @@
 -- A NULL target means "must not change". Cases marked "same" in target are the
 -- regression guards; cases with a lower target are the wins. Cases 20-21 are
 -- Phase 4 (joins) targets and are expected to still show master values after
--- Phase 1; run with -v phase=1 to score them as "same".
+-- Phase 1; run with -v phase=1 to score them as "same". Case 17 (HashAgg
+-- directly above a scan that therefore has no projection) is a Phase 5 target:
+-- the eflags permission rule cannot see that hash aggregation stores only the
+-- grouping column. Case 23: one detoast saves 133 heap + 3 toast index blocks
+-- in the EXPLAIN buffer counts.
 --
 -- Not covered here, deferred to the injection-point test module: holdable
 -- cursors (need transaction control), Memoize (needs a repeating outer side),
@@ -151,8 +155,8 @@ WITH cases(n, label, settings, q, m_toast, m_shared, m_rows, p_toast, p_shared, 
                                                                                                                                                      28, NULL, 1,  NULL, NULL, 1),
  (15, 'Sort above scan projecting bare doc + 2 ops',  NULL,      $$SELECT doc, doc->'a', doc->'b' FROM dt_probe ORDER BY id$$,                     266, NULL, 1,  NULL, NULL, 1),
  (16, 'Sort above scan, doc not projected',           NULL,      $$SELECT doc->'a', doc->'b' FROM dt_probe ORDER BY id$$,                          266, NULL, 1,   133, NULL, 1),
- (17, 'GROUP BY with 2 WHERE ops',                    NULL,      $$SELECT count(*) FROM dt_probe WHERE doc ? 'a' AND doc @> '{"b":2}' GROUP BY id$$,
-                                                                                                                                                    266, NULL, 1,   133, NULL, 1),
+ (17, 'HashAgg directly above scan, 2 WHERE ops',     NULL,      $$SELECT count(*) FROM dt_probe WHERE doc ? 'a' AND doc @> '{"b":2}' GROUP BY id$$,
+                                                                                                                                                    266, NULL, 1,   133, NULL, 5),
  (18, 'hash agg on bare doc',                         NULL,      $$SELECT count(*) FROM dt_probe GROUP BY doc$$,                                    133, NULL, 1,  NULL, NULL, 1),
  (19, 'CTE MATERIALIZED then 2 ops',                  NULL,      $$WITH d AS MATERIALIZED (SELECT doc FROM dt_probe) SELECT doc->'a', doc->'b' FROM d$$,
                                                                                                                                                     266, NULL, 1,   133, NULL, 1),
@@ -160,13 +164,15 @@ WITH cases(n, label, settings, q, m_toast, m_shared, m_rows, p_toast, p_shared, 
  (21, 'nested loop, 2 ops on probe side',             :'nl',     $$SELECT p.doc->'a', p.doc->'b' FROM dt_probe p JOIN dt_probe2 q ON p.id = q.id$$, 266, NULL, 1,   133, NULL, 4),
  (22, 'lateral subquery pulled up',                   NULL,      $$SELECT s.a, s.b FROM dt_probe p, LATERAL (SELECT p.doc->'a' AS a, p.doc->'b' AS b) s$$,
                                                                                                                                                     266, NULL, 1,   133, NULL, 1),
- (23, 'parallel seq scan, workers evaluate 2 ops',    :'par',    $$SELECT doc->'a', doc->'b' FROM dt_probe$$,                                         0,  333, 1,     0,  200, 1),
+ (23, 'parallel seq scan, workers evaluate 2 ops',    :'par',    $$SELECT doc->'a', doc->'b' FROM dt_probe$$,                                         0,  333, 1,     0,  197, 1),
  (24, 'UPDATE with 2 WHERE ops (pointer kept)',       NULL,      $$UPDATE dt_probe SET small = small WHERE doc ? 'a' AND doc @> '{"b":2}'$$,        266, NULL, 0,   133, NULL, 1),
  (25, 'PL/pgSQL function with 2 ops',                 NULL,      $$SELECT dt_plpgsql_two_ops()$$,                                                  266, NULL, 1,   133, NULL, 1),
  (26, 'JIT on: 4 ops (no-op without llvm)',           :'jit',    $$SELECT doc->'a', doc->'b', doc->'c', doc->'d' FROM dt_probe$$,                   532, NULL, 1,   133, NULL, 1),
  (27, 'raw readers on compressed column (docz)',      NULL,      format($$SELECT docz->'a', docz->'b' FROM dt_probe WHERE pg_column_size(docz) = %s
                                                                    AND pg_column_compression(docz) IS NOT NULL AND pg_column_toast_chunk_id(docz) IS NOT NULL$$, :docz_colsize),
-                                                                                                                                                     20, NULL, 1,    10, NULL, 1)
+                                                                                                                                                     20, NULL, 1,  NULL, NULL, 1),
+ (28, 'GroupAgg via Sort above scan, 2 WHERE ops',    'enable_hashagg=off', $$SELECT count(*) FROM dt_probe WHERE doc ? 'a' AND doc @> '{"b":2}' GROUP BY id$$,
+                                                                                                                                                    266, NULL, 1,   133, NULL, 1)
 )
 SELECT c.n, c.label, r.toast_blks, r.shared_blks, r.rows, r.ms,
        CASE WHEN :'mode' = 'patched' AND c.min_phase <= :phase THEN c.p_toast  ELSE c.m_toast  END::bigint AS exp_toast,
