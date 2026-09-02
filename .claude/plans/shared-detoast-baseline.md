@@ -45,6 +45,9 @@ instructions and as a fraction of base.
 
 ## Guard suite (.claude/harness/detoast_guard.sql), mode=master
 
+- eddie-debian inst-perf and inst-debug (cassert): 27/27 ok each, identity kept; identical
+  block counts to the Mac after pinning docz to pglz (lz4 builds compress it to 16
+  blocks per two detoasts instead of 20).
 - Mac, scratchpad build (no cassert, no lz4): 27/27 ok, toast pointer identity kept
   after UPDATE; mode=patched phase=1 on the same master build flags exactly the 16
   win cases and exits 3, as intended.
