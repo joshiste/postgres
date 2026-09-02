@@ -544,6 +544,38 @@ typedef struct Scan
 	Index		scanrelid;
 } Scan;
 
+/*
+ * Is this plan node a Scan (or a type derived from Scan)?  Executor states
+ * of several non-scan nodes (Agg, Sort, Material, ...) embed a ScanState, so
+ * code reached through one cannot assume the plan is a Scan without asking.
+ */
+static inline bool
+IsScanPlan(const Plan *plan)
+{
+	switch (nodeTag(plan))
+	{
+		case T_SeqScan:
+		case T_SampleScan:
+		case T_IndexScan:
+		case T_IndexOnlyScan:
+		case T_BitmapHeapScan:
+		case T_TidScan:
+		case T_TidRangeScan:
+		case T_SubqueryScan:
+		case T_FunctionScan:
+		case T_TableFuncScan:
+		case T_ValuesScan:
+		case T_CteScan:
+		case T_NamedTuplestoreScan:
+		case T_WorkTableScan:
+		case T_ForeignScan:
+		case T_CustomScan:
+			return true;
+		default:
+			return false;
+	}
+}
+
 /* ----------------
  *		sequential scan node
  * ----------------
