@@ -18,9 +18,12 @@
  */
 #include "postgres.h"
 
+#include "catalog/pg_type.h"
 #include "executor/executor.h"
 #include "executor/execScan.h"
 #include "miscadmin.h"
+#include "nodes/nodeFuncs.h"
+#include "utils/fmgroids.h"
 
 /* ----------------------------------------------------------------
  *		ExecScan
@@ -153,4 +156,114 @@ ExecScanReScan(ScanState *node)
 			}
 		}
 	}
+}
+
+
+/* Detoast a toasted column once per row when several expressions reference it */
+bool		shared_detoast = true;
+
+/*
+ * Attributes of this scan node's slot that several of its expressions would
+ * detoast.  This is the decision point that the executor-side and planner-side
+ * variants replace; the base returns none, so nothing changes yet.
+ */
+static Bitmapset *
+ExecScanPredetoastCandidates(ScanState *node, TupleDesc tupdesc)
+{
+	return NULL;
+}
+
+/*
+ * Functions whose result depends on the stored representation of their
+ * argument rather than on its value.  A Var passed directly to one of these
+ * must keep its toast pointer, so the attribute is never detoasted in place.
+ */
+static bool
+predetoast_veto_walker(Node *node, Bitmapset **vetoed)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, FuncExpr))
+	{
+		FuncExpr   *f = (FuncExpr *) node;
+
+		if (f->funcid == F_PG_COLUMN_SIZE ||
+			f->funcid == F_PG_COLUMN_COMPRESSION ||
+			f->funcid == F_PG_COLUMN_TOAST_CHUNK_ID)
+		{
+			ListCell   *lc;
+
+			foreach(lc, f->args)
+			{
+				Var		   *arg = (Var *) lfirst(lc);
+
+				if (IsA(arg, Var) && arg->varattno > 0)
+					*vetoed = bms_add_member(*vetoed, arg->varattno);
+			}
+		}
+	}
+	return expression_tree_walker(node, predetoast_veto_walker, vetoed);
+}
+
+/*
+ * ExecScanPredetoastAttrs
+ *
+ * Decide which scan-slot attributes this node may detoast in place.  A
+ * detoasted value written back into the scan slot is visible to every
+ * expression of the node, which is the point, but also to any parent that
+ * reads the slot or a projection of it.  That is harmless as long as the
+ * value is never copied into a stored tuple, so an attribute qualifies when
+ * either the parent chain consumes rows one at a time (EXEC_FLAG_ROW_CONSUMER)
+ * or the node projects and the attribute leaves it only inside expression
+ * results, never as a bare Var.  A node without projection hands its scan slot
+ * to the parent, so all attributes count as projected there.  Attributes
+ * inspected by a representation-dependent function are excluded outright.
+ */
+Bitmapset *
+ExecScanPredetoastAttrs(ScanState *node, TupleDesc tupdesc, int eflags)
+{
+	Plan	   *plan = node->ps.plan;
+	Bitmapset  *candidates;
+	Bitmapset  *allowed = NULL;
+	Bitmapset  *vetoed = NULL;
+	ListCell   *lc;
+
+	if (!shared_detoast || tupdesc == NULL)
+		return NULL;
+
+	candidates = ExecScanPredetoastCandidates(node, tupdesc);
+	if (candidates == NULL)
+		return NULL;
+
+	for (int i = 0; i < tupdesc->natts; i++)
+	{
+		Form_pg_attribute att = TupleDescAttr(tupdesc, i);
+
+		if (att->attisdropped || att->attlen != -1 ||
+			att->attstorage == TYPSTORAGE_PLAIN)
+			continue;
+		if (bms_is_member(att->attnum, candidates))
+			allowed = bms_add_member(allowed, att->attnum);
+	}
+
+	predetoast_veto_walker((Node *) plan->targetlist, &vetoed);
+	predetoast_veto_walker((Node *) plan->qual, &vetoed);
+	allowed = bms_del_members(allowed, vetoed);
+
+	if (eflags & EXEC_FLAG_ROW_CONSUMER)
+		return allowed;
+
+	if (tlist_matches_tupdesc(&node->ps, plan->targetlist,
+							  ((Scan *) plan)->scanrelid, tupdesc))
+		return NULL;			/* no projection: the whole slot is passed up */
+
+	foreach(lc, plan->targetlist)
+	{
+		TargetEntry *tle = (TargetEntry *) lfirst(lc);
+
+		if (IsA(tle->expr, Var) && ((Var *) tle->expr)->varattno > 0)
+			allowed = bms_del_member(allowed, ((Var *) tle->expr)->varattno);
+	}
+
+	return allowed;
 }

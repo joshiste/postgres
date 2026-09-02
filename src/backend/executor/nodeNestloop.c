@@ -267,12 +267,14 @@ ExecInitNestLoop(NestLoop *node, EState *estate, int eflags)
 	 * inner child, because it will always be rescanned with fresh parameter
 	 * values.
 	 */
-	outerPlanState(nlstate) = ExecInitNode(outerPlan(node), estate, eflags);
+	outerPlanState(nlstate) = ExecInitNode(outerPlan(node), estate,
+										   EXEC_PASS_ROW_CONSUMER(eflags));
 	if (node->nestParams == NIL)
 		eflags |= EXEC_FLAG_REWIND;
 	else
 		eflags &= ~EXEC_FLAG_REWIND;
-	innerPlanState(nlstate) = ExecInitNode(innerPlan(node), estate, eflags);
+	innerPlanState(nlstate) = ExecInitNode(innerPlan(node), estate,
+										   EXEC_PASS_ROW_CONSUMER(eflags));
 
 	/*
 	 * Initialize result slot, type and projection.
