@@ -8,24 +8,30 @@ Both contenders sit on `detoast-base`; only the decider differs.
 
 | check                                                     | base | A exec | B plan |
 |-----------------------------------------------------------|------|--------|--------|
-| guard suite, mode=master on cassert build (all ok)        |      |        |        |
+| guard suite, mode=master on cassert build (all ok)        | 28/28 |        |        |
 | guard suite, mode=patched phase=1 on cassert build        | n/a  |        |        |
-| check-world, cassert build                                |      |        |        |
-| toast pointer identity kept after UPDATE (case 24)        |      |        |        |
+| check-world, cassert build                                | see baseline |  |     |
+| toast pointer identity kept after UPDATE (case 24)        | yes  |        |        |
 
 ## Criterion 1: init overhead (user-space instructions per iteration, perfbench.sh)
 
 Absolute delta over base; the fraction is for readability only. Base values from
 shared-detoast-baseline.md: loop_noop 24,128; loop_jsonb 32,374; loop_wide 5,100,165.
 
-| workload   | base instr/iter | A instr/iter | A delta | B instr/iter | B delta |
-|------------|----------------:|-------------:|--------:|-------------:|--------:|
-| loop_noop  |          24,128 |              |         |              |         |
-| loop_jsonb |          32,374 |              |         |              |         |
-| loop_wide  |       5,100,165 |              |         |              |         |
+| workload   | master instr/iter | base instr/iter | base delta | A instr/iter | A delta | B instr/iter | B delta |
+|------------|------------------:|----------------:|-----------:|-------------:|--------:|-------------:|--------:|
+| loop_noop  |            24,128 |          24,155 |        +27 |              |         |              |         |
+| loop_jsonb |            32,374 |          32,366 |         -8 |              |         |              |         |
+| loop_wide  |         5,100,165 |       5,089,749 |    -10,416 |              |         |              |         |
 
-Scoring: lower delta wins; a difference below 10 instructions per iteration on
-loop_noop is a tie. loop_jsonb is expected to drop for both (one detoast saved
+Base measured 2026-09-02 on eddie-debian (perf build, --enable-depend). The base adds
+the per-store reset branch, the ExecInitNode flag translation and the (empty) decision
+call; +27 instructions on loop_noop is that cost. The negative deltas are code-layout
+effects of recompiling with the changed headers, so differences of that size between
+A and B are noise, not signal.
+
+Scoring: lower delta wins; a difference below 30 instructions per iteration on
+loop_noop (about 0.1%, the size of layout effects seen for the base) is a tie. loop_jsonb is expected to drop for both (one detoast saved
 outweighs the walk); the comparison there is between A and B, not against base.
 
 ## Criterion 2: coverage (guard suite, mode=patched phase=1)

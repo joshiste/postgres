@@ -54,3 +54,15 @@ instructions and as a fraction of base.
 - Pinned master values worth knowing: text slice/size readers fetch 28 toast blocks
   (case 14); the compressed docz column costs 10 toast blocks per detoast (case 27);
   the parallel case shows 0 leader-local toast blocks and 333 shared blocks (case 23).
+
+## Base (detoast-base with the empty decision hook, commit f064153d4d)
+
+- Guard suite mode=master: 28/28 ok on Mac, VM perf and VM debug (cassert).
+- Throwaway decider (all toastable attributes) in mode=patched phase=1: all Phase 1
+  win cases at target, all guards hold, toast pointer identity kept; cases 13 and 27
+  pass only because of the raw-reader veto.
+- Mac `make check` on the base: all 243 tests passed.
+- perfbench inst-perf (rebuilt with --enable-depend), 200000 iterations:
+  loop_noop 24,155 (+27 vs master), loop_jsonb 32,366 (-8), loop_wide 5,089,749
+  (-10,416, -0.2%). The negative deltas are layout effects of the header change; the
+  +27 is the mechanism's own cost on a statement it cannot help.
