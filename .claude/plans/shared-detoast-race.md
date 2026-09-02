@@ -48,10 +48,13 @@ the two differ.
 
 | measure                     | A | B |
 |-----------------------------|---|---|
-| diff lines vs detoast-base  |   |   |
-| files touched               |   |   |
-| subsystems touched          |   |   |
-| new Plan node fields        | 0 |   |
+| diff lines vs detoast-base  | 8 (+6/-2, execScan.c only) | 26 (+21/-5) |
+| files touched               | 1 | 3 (execScan.c, setrefs.c, plannodes.h) |
+| subsystems touched          | executor | executor, planner, node definitions |
+| new Plan node fields        | 0 | 1 (Scan.predetoast_attrs, Bitmapset) |
+
+Both rely on pull_multi_detoast_attrs() in the base (about 200 lines), so the
+comparison above is the decider-specific part only.
 
 ## Criterion 4: plan cache and EXPLAIN behaviour
 
