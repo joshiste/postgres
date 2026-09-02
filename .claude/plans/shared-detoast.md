@@ -94,6 +94,29 @@ candidates the eflags rule denies so its value can be judged with numbers.
 - INJECTION_POINT compiles to `((void) name)` without --enable-injection-points, so
   a point in detoast_attr costs nothing in production builds.
 
+## Findings while building the base (2026-09-02)
+
+- Autoconf builds need `--enable-depend`, otherwise a change to tuptable.h leaves
+  stale objects and the server dies with a bus error in bootstrap. Both VM builds
+  and the Mac build are configured with it now.
+- Representation-dependent functions (pg_column_size, pg_column_compression,
+  pg_column_toast_chunk_id) must veto pre-detoasting of the attribute they inspect,
+  not merely be left out of the reference count: another reference would otherwise
+  make them see the detoasted value. The veto is part of the base (guard cases 13,
+  27, and the suite's own setup query depend on it).
+- HashAggregate directly above a scan leaves the scan without projection (the Agg
+  projects), so the eflags rule denies and case 17 stays at two detoasts; with a
+  Sort in between the scan projects and drops to one (case 28). Hash aggregation
+  stores only grouping columns, so a parent-side attribute analysis (Phase 5)
+  could allow this shape.
+- The same deny hits joins directly above projection-free scans; Phase 4 handles
+  those at the join level.
+- One detoast costs 133 toast heap blocks plus 3 toast index blocks in EXPLAIN's
+  buffer counts; the per-relation xact counters on master attribute the index
+  blocks elsewhere.
+- Throwaway decider (all toastable attributes) on the base: every Phase 1 win case
+  reaches its target, all guards hold, UPDATE keeps its toast pointer.
+
 ## Phases
 
 ### Phase 0: baseline and guard rails (no product code)
