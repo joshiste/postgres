@@ -495,6 +495,8 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		&&CASE_EEOP_SCAN_VAR,
 		&&CASE_EEOP_OLD_VAR,
 		&&CASE_EEOP_NEW_VAR,
+		&&CASE_EEOP_INNER_VAR_TOAST,
+		&&CASE_EEOP_OUTER_VAR_TOAST,
 		&&CASE_EEOP_SCAN_VAR_TOAST,
 		&&CASE_EEOP_INNER_SYSVAR,
 		&&CASE_EEOP_OUTER_SYSVAR,
@@ -727,6 +729,42 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			Assert(attnum >= 0 && attnum < scanslot->tts_nvalid);
 			*op->resvalue = scanslot->tts_values[attnum];
 			*op->resnull = scanslot->tts_isnull[attnum];
+
+			EEO_NEXT();
+		}
+
+		EEO_CASE(EEOP_INNER_VAR_TOAST)
+		{
+			int			attnum = op->d.var.attnum;
+
+			/* only out-of-line or compressed values are worth the call */
+			Assert(attnum >= 0 && attnum < innerslot->tts_nvalid);
+			if (!innerslot->tts_isnull[attnum] &&
+				VARATT_IS_EXTENDED(DatumGetPointer(innerslot->tts_values[attnum])))
+				ExecEvalVarToast(state, op, econtext, innerslot);
+			else
+			{
+				*op->resvalue = innerslot->tts_values[attnum];
+				*op->resnull = innerslot->tts_isnull[attnum];
+			}
+
+			EEO_NEXT();
+		}
+
+		EEO_CASE(EEOP_OUTER_VAR_TOAST)
+		{
+			int			attnum = op->d.var.attnum;
+
+			/* only out-of-line or compressed values are worth the call */
+			Assert(attnum >= 0 && attnum < outerslot->tts_nvalid);
+			if (!outerslot->tts_isnull[attnum] &&
+				VARATT_IS_EXTENDED(DatumGetPointer(outerslot->tts_values[attnum])))
+				ExecEvalVarToast(state, op, econtext, outerslot);
+			else
+			{
+				*op->resvalue = outerslot->tts_values[attnum];
+				*op->resnull = outerslot->tts_isnull[attnum];
+			}
 
 			EEO_NEXT();
 		}

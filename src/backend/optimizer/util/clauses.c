@@ -6779,6 +6779,7 @@ make_SAOP_expr(Oid oper, Node *leftexpr, Oid coltype, Oid arraycollid,
 
 typedef struct
 {
+	Index		varno;			/* only Vars of this varno count; 0 = any */
 	Bitmapset  *seen_once;		/* attnos seen in one detoasting position */
 	Bitmapset  *vetoed;			/* attnos inspected by a raw reader */
 	List	   *multi_vars;		/* one Var per attno seen in two or more */
@@ -6843,11 +6844,12 @@ func_reads_slice_or_size(Oid funcid)
 }
 
 static Var *
-strip_relabel_var(Node *arg)
+strip_relabel_var(Node *arg, Index varno)
 {
 	while (IsA(arg, RelabelType))
 		arg = (Node *) ((RelabelType *) arg)->arg;
-	if (IsA(arg, Var) && ((Var *) arg)->varattno > 0)
+	if (IsA(arg, Var) && ((Var *) arg)->varattno > 0 &&
+		(varno == 0 || ((Var *) arg)->varno == varno))
 		return (Var *) arg;
 	return NULL;
 }
@@ -6855,7 +6857,7 @@ strip_relabel_var(Node *arg)
 static void
 pull_multi_detoast_count(Node *arg, pull_multi_detoast_context *context)
 {
-	Var		   *var = strip_relabel_var(arg);
+	Var		   *var = strip_relabel_var(arg, context->varno);
 
 	if (var == NULL)
 	{
@@ -6919,7 +6921,8 @@ pull_multi_detoast_walker(Node *node, pull_multi_detoast_context *context)
 
 					foreach(lc, f->args)
 					{
-						Var		   *var = strip_relabel_var((Node *) lfirst(lc));
+						Var		   *var = strip_relabel_var((Node *) lfirst(lc),
+															context->varno);
 
 						if (var)
 							context->vetoed = bms_add_member(context->vetoed,
@@ -7010,16 +7013,18 @@ pull_multi_detoast_walker(Node *node, pull_multi_detoast_context *context)
  * construction.  Bare Vars in the targetlist, and Vars passed to functions
  * known to read only a slice or the size of their argument, do not count.
  * Vars passed to a function that inspects the stored representation are
- * excluded even if referenced elsewhere.  Returns one Var per attribute
- * number; the caller checks toastability.
+ * excluded even if referenced elsewhere.  Only Vars with the given varno
+ * count (0 means any, for scan nodes; OUTER_VAR or INNER_VAR for joins).
+ * Returns one Var per attribute number; the caller checks toastability.
  */
 List *
-pull_multi_detoast_vars(List *targetlist, List *qual)
+pull_multi_detoast_vars(List *targetlist, List *qual, Index varno)
 {
 	pull_multi_detoast_context context;
 	List	   *result = NIL;
 	ListCell   *lc;
 
+	context.varno = varno;
 	context.seen_once = NULL;
 	context.vetoed = NULL;
 	context.multi_vars = NIL;

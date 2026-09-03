@@ -141,7 +141,7 @@ typedef enum
 extern bool contain_mutable_functions(Node *clause);
 extern bool contain_mutable_functions_after_planning(Expr *expr);
 extern bool contain_volatile_functions(Node *clause);
-extern List *pull_multi_detoast_vars(List *targetlist, List *qual);
+extern List *pull_multi_detoast_vars(List *targetlist, List *qual, Index varno);
 extern bool contain_volatile_functions_after_planning(Expr *expr);
 extern bool contain_volatile_functions_not_nextval(Node *clause);
 

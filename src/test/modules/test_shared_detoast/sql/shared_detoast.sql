@@ -71,6 +71,29 @@ UPDATE sd SET small = small WHERE doc ? 'a' AND doc @> '{"b": 2}';
 SELECT pg_column_toast_chunk_id(doc) = (SELECT chunk FROM before) AS pointer_kept FROM sd;
 -- (parallel workers are covered elsewhere: injection points attached locally are
 -- not seen by worker processes)
+-- joins: the expressions are evaluated at the join, the value lives in the
+-- child's slot; hash join (probe side), nested loop (both sides) and the outer
+-- side of a merge join detoast once, the inner side of a merge join is left alone
+CREATE TABLE sd2 (id int PRIMARY KEY, doc jsonb);
+ALTER TABLE sd2 ALTER COLUMN doc SET STORAGE EXTERNAL;
+INSERT INTO sd2 SELECT id, doc FROM sd;
+SET enable_nestloop = off; SET enable_mergejoin = off;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT p.doc->'a', p.doc->'b' FROM sd p JOIN sd2 q ON p.id = q.id;
+SELECT p.doc->'a', p.doc->'b' FROM sd p JOIN sd2 q ON p.id = q.id;
+SELECT p.doc->'a', p.doc->'b', q.doc->'a', q.doc->'b' FROM sd p JOIN sd2 q ON p.id = q.id;
+RESET enable_nestloop; RESET enable_mergejoin;
+SET enable_hashjoin = off; SET enable_mergejoin = off;
+SELECT p.doc->'a', p.doc->'b', q.doc->'a', q.doc->'b' FROM sd p JOIN sd2 q ON p.id = q.id;
+RESET enable_hashjoin; RESET enable_mergejoin;
+SET enable_hashjoin = off; SET enable_nestloop = off;
+EXPLAIN (COSTS OFF) SELECT p.doc->'a', p.doc->'b', q.doc->'a', q.doc->'b' FROM sd p JOIN sd2 q ON p.id = q.id;
+SELECT p.doc->'a', p.doc->'b', q.doc->'a', q.doc->'b' FROM sd p JOIN sd2 q ON p.id = q.id;
+RESET enable_hashjoin; RESET enable_nestloop;
+-- a join key is never detoasted in place, even when referenced again
+SET enable_nestloop = off; SET enable_mergejoin = off;
+SELECT count(*) FROM sd p JOIN sd2 q ON p.doc = q.doc WHERE p.doc ? 'a' AND p.doc @> '{"b": 2}';
+RESET enable_nestloop; RESET enable_mergejoin;
+DROP TABLE sd2;
 -- an inline column never detoasts
 SELECT small->'a', small->'b' FROM sd;
 -- switching the feature off restores one detoast per reference

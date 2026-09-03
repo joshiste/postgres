@@ -1035,6 +1035,16 @@ typedef struct Join
 	/* JOIN quals (in addition to plan.qual) */
 	List	   *joinqual;
 	Bitmapset  *ojrelids;
+
+	/*
+	 * Per input side, the toastable attributes several of this node's
+	 * expressions detoast, as for Scan.predetoast_attrs_safe/_all (see
+	 * set_join_predetoast_attrs)
+	 */
+	Bitmapset  *predetoast_outer_safe;
+	Bitmapset  *predetoast_outer_all;
+	Bitmapset  *predetoast_inner_safe;
+	Bitmapset  *predetoast_inner_all;
 } Join;
 
 /* ----------------

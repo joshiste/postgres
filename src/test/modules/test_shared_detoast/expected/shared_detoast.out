@@ -184,6 +184,93 @@ SELECT pg_column_toast_chunk_id(doc) = (SELECT chunk FROM before) AS pointer_kep
 
 -- (parallel workers are covered elsewhere: injection points attached locally are
 -- not seen by worker processes)
+-- joins: the expressions are evaluated at the join, the value lives in the
+-- child's slot; hash join (probe side), nested loop (both sides) and the outer
+-- side of a merge join detoast once, the inner side of a merge join is left alone
+CREATE TABLE sd2 (id int PRIMARY KEY, doc jsonb);
+ALTER TABLE sd2 ALTER COLUMN doc SET STORAGE EXTERNAL;
+INSERT INTO sd2 SELECT id, doc FROM sd;
+SET enable_nestloop = off; SET enable_mergejoin = off;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT p.doc->'a', p.doc->'b' FROM sd p JOIN sd2 q ON p.id = q.id;
+                      QUERY PLAN                      
+------------------------------------------------------
+ Hash Join
+   Output: (p.doc -> 'a'::text), (p.doc -> 'b'::text)
+   Inner Unique: true
+   Hash Cond: (q.id = p.id)
+   Pre-detoast Inner: p.doc
+   ->  Seq Scan on public.sd2 q
+         Output: q.id, q.doc
+   ->  Hash
+         Output: p.doc, p.id
+         ->  Seq Scan on public.sd p
+               Output: p.doc, p.id
+(11 rows)
+
+SELECT p.doc->'a', p.doc->'b' FROM sd p JOIN sd2 q ON p.id = q.id;
+NOTICE:  notice triggered for injection point detoast-attr-external
+ ?column? | ?column? 
+----------+----------
+ 1        | 2
+(1 row)
+
+SELECT p.doc->'a', p.doc->'b', q.doc->'a', q.doc->'b' FROM sd p JOIN sd2 q ON p.id = q.id;
+NOTICE:  notice triggered for injection point detoast-attr-external
+NOTICE:  notice triggered for injection point detoast-attr-external
+ ?column? | ?column? | ?column? | ?column? 
+----------+----------+----------+----------
+ 1        | 2        | 1        | 2
+(1 row)
+
+RESET enable_nestloop; RESET enable_mergejoin;
+SET enable_hashjoin = off; SET enable_mergejoin = off;
+SELECT p.doc->'a', p.doc->'b', q.doc->'a', q.doc->'b' FROM sd p JOIN sd2 q ON p.id = q.id;
+NOTICE:  notice triggered for injection point detoast-attr-external
+NOTICE:  notice triggered for injection point detoast-attr-external
+ ?column? | ?column? | ?column? | ?column? 
+----------+----------+----------+----------
+ 1        | 2        | 1        | 2
+(1 row)
+
+RESET enable_hashjoin; RESET enable_mergejoin;
+SET enable_hashjoin = off; SET enable_nestloop = off;
+EXPLAIN (COSTS OFF) SELECT p.doc->'a', p.doc->'b', q.doc->'a', q.doc->'b' FROM sd p JOIN sd2 q ON p.id = q.id;
+                QUERY PLAN                
+------------------------------------------
+ Merge Join
+   Merge Cond: (q.id = p.id)
+   ->  Index Scan using sd2_pkey on sd2 q
+   ->  Sort
+         Sort Key: p.id
+         ->  Seq Scan on sd p
+(6 rows)
+
+SELECT p.doc->'a', p.doc->'b', q.doc->'a', q.doc->'b' FROM sd p JOIN sd2 q ON p.id = q.id;
+NOTICE:  notice triggered for injection point detoast-attr-external
+NOTICE:  notice triggered for injection point detoast-attr-external
+NOTICE:  notice triggered for injection point detoast-attr-external
+ ?column? | ?column? | ?column? | ?column? 
+----------+----------+----------+----------
+ 1        | 2        | 1        | 2
+(1 row)
+
+RESET enable_hashjoin; RESET enable_nestloop;
+-- a join key is never detoasted in place, even when referenced again
+SET enable_nestloop = off; SET enable_mergejoin = off;
+SELECT count(*) FROM sd p JOIN sd2 q ON p.doc = q.doc WHERE p.doc ? 'a' AND p.doc @> '{"b": 2}';
+NOTICE:  notice triggered for injection point detoast-attr-external
+NOTICE:  notice triggered for injection point detoast-attr-external
+NOTICE:  notice triggered for injection point detoast-attr-external
+NOTICE:  notice triggered for injection point detoast-attr-external
+NOTICE:  notice triggered for injection point detoast-attr-external
+NOTICE:  notice triggered for injection point detoast-attr-external
+ count 
+-------
+     1
+(1 row)
+
+RESET enable_nestloop; RESET enable_mergejoin;
+DROP TABLE sd2;
 -- an inline column never detoasts
 SELECT small->'a', small->'b' FROM sd;
  ?column? | ?column? 

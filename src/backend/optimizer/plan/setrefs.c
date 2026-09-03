@@ -137,6 +137,7 @@ static void add_rte_to_flat_rtable(PlannerGlobal *glob, List *rteperminfos,
 								   RangeTblEntry *rte);
 static Plan *set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset);
 static void set_scan_predetoast_attrs(PlannerInfo *root, Scan *scan);
+static void set_join_predetoast_attrs(Join *join);
 static Plan *set_indexonlyscan_references(PlannerInfo *root,
 										  IndexOnlyScan *plan,
 										  int rtoffset);
@@ -656,7 +657,7 @@ set_scan_predetoast_attrs(PlannerInfo *root, Scan *scan)
 	scan->predetoast_attrs_safe = NULL;
 	scan->predetoast_attrs_all = NULL;
 
-	vars = pull_multi_detoast_vars(plan->targetlist, plan->qual);
+	vars = pull_multi_detoast_vars(plan->targetlist, plan->qual, 0);
 	if (vars == NIL)
 		return;
 
@@ -706,6 +707,84 @@ set_scan_predetoast_attrs(PlannerInfo *root, Scan *scan)
 
 	scan->predetoast_attrs_all = all;
 	scan->predetoast_attrs_safe = safe;
+}
+
+/*
+ * set_join_predetoast_attrs
+ *		Same as set_scan_predetoast_attrs, per input side of a join.
+ *
+ * The join's expressions see its inputs through OUTER_VAR and INNER_VAR;
+ * a detoasted value is written into the child's slot, so the same rules
+ * apply as for a scan's own slot.  Attributes used in the merge or hash
+ * clauses are left out: those are evaluated when a tuple is fetched, before
+ * it may be spilled or hashed, so they must keep their toast pointers.
+ */
+static void
+set_join_predetoast_attrs(Join *join)
+{
+	Plan	   *plan = &join->plan;
+	List	   *quals = list_concat_copy(join->joinqual, plan->qual);
+	List	   *keyvars = NIL;
+	Index		sides[2] = {OUTER_VAR, INNER_VAR};
+	ListCell   *lc;
+
+	if (IsA(join, MergeJoin))
+		keyvars = pull_var_clause((Node *) ((MergeJoin *) join)->mergeclauses, 0);
+	else if (IsA(join, HashJoin))
+		keyvars = pull_var_clause((Node *) ((HashJoin *) join)->hashclauses, 0);
+
+	for (int side = 0; side < 2; side++)
+	{
+		List	   *vars = pull_multi_detoast_vars(plan->targetlist, quals,
+												   sides[side]);
+		Bitmapset  *all = NULL;
+		Bitmapset  *safe = NULL;
+		Bitmapset  *bare = NULL;
+
+		foreach(lc, vars)
+		{
+			Var		   *var = (Var *) lfirst(lc);
+
+			if (get_typlen(var->vartype) != -1 ||
+				get_typstorage(var->vartype) == TYPSTORAGE_PLAIN)
+				continue;
+			all = bms_add_member(all, var->varattno);
+		}
+		list_free(vars);
+		if (all == NULL)
+			continue;
+
+		foreach(lc, keyvars)
+		{
+			Var		   *var = (Var *) lfirst(lc);
+
+			if (var->varno == sides[side] && var->varattno > 0)
+				all = bms_del_member(all, var->varattno);
+		}
+		foreach(lc, plan->targetlist)
+		{
+			TargetEntry *tle = (TargetEntry *) lfirst(lc);
+
+			if (IsA(tle->expr, Var) && ((Var *) tle->expr)->varno == sides[side] &&
+				((Var *) tle->expr)->varattno > 0)
+				bare = bms_add_member(bare, ((Var *) tle->expr)->varattno);
+		}
+		safe = bms_difference(all, bare);
+		bms_free(bare);
+
+		if (sides[side] == OUTER_VAR)
+		{
+			join->predetoast_outer_all = all;
+			join->predetoast_outer_safe = safe;
+		}
+		else
+		{
+			join->predetoast_inner_all = all;
+			join->predetoast_inner_safe = safe;
+		}
+	}
+	list_free(quals);
+	list_free(keyvars);
 }
 
 /*
@@ -2592,6 +2671,8 @@ set_join_references(PlannerInfo *root, Join *join, int rtoffset)
 									rtoffset,
 									(bms_is_empty(join->ojrelids) ? NRM_EQUAL : NRM_SUPERSET),
 									NUM_EXEC_QUAL((Plan *) join));
+
+	set_join_predetoast_attrs(join);
 
 	pfree(outer_itlist);
 	pfree(inner_itlist);

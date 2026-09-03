@@ -883,6 +883,7 @@ ExecInitHashJoin(HashJoin *node, EState *estate, int eflags)
 	/*
 	 * Initialize result slot, type and projection.
 	 */
+	ExecInitJoinPredetoast(&hjstate->js, eflags, true, true);
 	ExecInitResultTupleSlotTL(&hjstate->js.ps, &TTSOpsVirtual);
 	ExecAssignProjectionInfo(&hjstate->js.ps, NULL);
 

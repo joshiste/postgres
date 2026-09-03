@@ -1251,6 +1251,8 @@ typedef struct PlanState
 	 * instead of at every reference.  NULL for nodes without a scan slot.
 	 */
 	Bitmapset  *ps_predetoast_scanattrs;
+	Bitmapset  *ps_predetoast_outerattrs;	/* same, for a join's inputs */
+	Bitmapset  *ps_predetoast_innerattrs;
 
 	bool		async_capable;	/* true if node is async-capable */
 

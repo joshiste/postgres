@@ -206,3 +206,28 @@ ExecScanPredetoastAttrs(ScanState *node, TupleDesc tupdesc, int eflags)
 
 	return scan->predetoast_attrs_safe;
 }
+
+/*
+ * ExecInitJoinPredetoast
+ *
+ * Join counterpart of ExecScanPredetoastAttrs: choose, per input side, the
+ * planner-recorded set the join's expressions may detoast in place.  Joins
+ * always project, so without EXEC_FLAG_ROW_CONSUMER the safe set applies.
+ * The caller says which sides are eligible; a side whose tuples the node
+ * itself copies (MergeJoin's marked inner tuple) is not.
+ */
+void
+ExecInitJoinPredetoast(JoinState *js, int eflags, bool outer_ok, bool inner_ok)
+{
+	Join	   *join = (Join *) js->ps.plan;
+	bool		permitted = (eflags & EXEC_FLAG_ROW_CONSUMER) != 0;
+
+	if (!shared_detoast)
+		return;
+	if (outer_ok)
+		js->ps.ps_predetoast_outerattrs =
+			permitted ? join->predetoast_outer_all : join->predetoast_outer_safe;
+	if (inner_ok)
+		js->ps.ps_predetoast_innerattrs =
+			permitted ? join->predetoast_inner_all : join->predetoast_inner_safe;
+}
