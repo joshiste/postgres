@@ -262,14 +262,26 @@ pull_multi_detoast_vars() (clauses.c) does the counting and the veto; get_attsto
 - JIT verified 2026-09-03 on the VM with an LLVM 14 cassert build: `make check` with
   jit forced (jit_above_cost=0 etc.) all 243 passed; the module test under forced JIT
   passes with identical detoast counts.
-- wal_consistency_checking=all regression run: pending clean rerun (first run only
-  showed the two EXPLAIN expected-output diffs since fixed).
+- wal_consistency_checking=all regression run: clean (243/243) on the VM cassert
+  build, 2026-09-03.
+- check-world on the cassert build after the module and EXPLAIN commits: clean apart
+  from EXPLAIN VERBOSE expected outputs that now show the new line (domain, rowtypes,
+  postgres_fdw; later subselect and join for the join phase), all updated.
 
 Benefit: the two failure modes reviewers feared, fat tuples in materializing nodes
 and semantic change for raw readers, are covered by deterministic tests, and the
 behaviour is visible in EXPLAIN.
 
-### Phase 4: join nodes
+### Phase 4: join nodes (code done 2026-09-03, commit 64f93ace70; VM verification pending)
+
+As built: set_join_predetoast_attrs() in set_join_references() records per side
+Join.predetoast_{outer,inner}_{safe,all}; attributes used in merge or hash clauses
+are excluded because they are evaluated on fetch, before spilling or hashing.
+EEOP_INNER_VAR_TOAST / EEOP_OUTER_VAR_TOAST detoast into the child's slot.
+ExecInitJoinPredetoast() picks the set per side: NestLoop and HashJoin both sides,
+MergeJoin outer only. Guard cases 20/21 reach one detoast; module test has join
+cases including the join-key exclusion (a jsonb join key stays at six detoasts).
+EXPLAIN shows "Pre-detoast Outer/Inner: p.doc" deparsed like other join expressions.
 
 - Extend the winning decider to Join nodes: count OUTER_VAR/INNER_VAR references in
   joinqual, plan.qual and tlist; per-side bitmaps on JoinState (for B, a per-side
