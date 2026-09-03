@@ -13014,6 +13014,26 @@ dynamic_library_path = '/usr/local/lib/postgresql:$libdir'
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-shared-detoast" xreflabel="shared_detoast">
+      <term><varname>shared_detoast</varname> (<type>boolean</type>)
+      <indexterm>
+       <primary><varname>shared_detoast</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        When a query references the same large (<quote>TOASTed</quote>)
+        column in several expressions of one plan node, the executor normally
+        fetches and decompresses the value once per reference.  With this
+        parameter on, which is the default, the value is fetched once per row
+        and the plain copy is reused by the other references.  <command>EXPLAIN
+        (VERBOSE)</command> lists the affected columns as
+        <literal>Pre-detoast</literal>.  This parameter is intended for
+        debugging and performance comparisons.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-ignore-system-indexes" xreflabel="ignore_system_indexes">
       <term><varname>ignore_system_indexes</varname> (<type>boolean</type>)
       <indexterm>
