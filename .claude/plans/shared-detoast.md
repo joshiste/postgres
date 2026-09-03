@@ -98,7 +98,7 @@ candidates the eflags rule denies so its value can be judged with numbers.
 
 - 2026-09-03: rebased from e073b64d33 onto upstream master 534db08f97 (7 commits);
   only typedefs.list overlapped. Guard 30/30 phase 6, module, regression suite clean on
-  the rebased tree (Mac); VM cassert check-world rerun queued.
+  the rebased tree (Mac); VM cassert build: guard 30/30, check-world clean.
 
 ## Findings while building the base (2026-09-02)
 
