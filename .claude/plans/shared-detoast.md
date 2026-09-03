@@ -94,6 +94,12 @@ candidates the eflags rule denies so its value can be judged with numbers.
 - INJECTION_POINT compiles to `((void) name)` without --enable-injection-points, so
   a point in detoast_attr costs nothing in production builds.
 
+## Rebase log
+
+- 2026-09-03: rebased from e073b64d33 onto upstream master 534db08f97 (7 commits);
+  only typedefs.list overlapped. Guard 30/30 phase 6, module, regression suite clean on
+  the rebased tree (Mac); VM cassert check-world rerun queued.
+
 ## Findings while building the base (2026-09-02)
 
 - Autoconf builds need `--enable-depend`, otherwise a change to tuptable.h leaves
