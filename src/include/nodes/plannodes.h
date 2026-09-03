@@ -542,7 +542,57 @@ typedef struct Scan
 	Plan		plan;
 	/* relid is index into the range table */
 	Index		scanrelid;
+
+	/*
+	 * Toastable scan-slot attributes that several of this node's expressions
+	 * detoast, which the executor may therefore detoast once per row in place
+	 * (see ExecScanPredetoastAttrs).  predetoast_attrs_safe holds those that
+	 * leave the node only inside expression results; predetoast_attrs_all
+	 * adds those the node also passes up unchanged, which is only safe when
+	 * the parent chain never stores a tuple.
+	 */
+	Bitmapset  *predetoast_attrs_safe;
+	Bitmapset  *predetoast_attrs_all;
+
+	/*
+	 * The subset usable when this node hands its whole scan slot to the
+	 * parent (no projection), decided from what that parent does with the
+	 * slot (see set_child_predetoast_noproj)
+	 */
+	Bitmapset  *predetoast_attrs_noproj;
 } Scan;
+
+/*
+ * Is this plan node a Scan (or a type derived from Scan)?  Executor states
+ * of several non-scan nodes (Agg, Sort, Material, ...) embed a ScanState, so
+ * code reached through one cannot assume the plan is a Scan without asking.
+ */
+static inline bool
+IsScanPlan(const Plan *plan)
+{
+	switch (nodeTag(plan))
+	{
+		case T_SeqScan:
+		case T_SampleScan:
+		case T_IndexScan:
+		case T_IndexOnlyScan:
+		case T_BitmapHeapScan:
+		case T_TidScan:
+		case T_TidRangeScan:
+		case T_SubqueryScan:
+		case T_FunctionScan:
+		case T_TableFuncScan:
+		case T_ValuesScan:
+		case T_CteScan:
+		case T_NamedTuplestoreScan:
+		case T_WorkTableScan:
+		case T_ForeignScan:
+		case T_CustomScan:
+			return true;
+		default:
+			return false;
+	}
+}
 
 /* ----------------
  *		sequential scan node
@@ -992,6 +1042,16 @@ typedef struct Join
 	/* JOIN quals (in addition to plan.qual) */
 	List	   *joinqual;
 	Bitmapset  *ojrelids;
+
+	/*
+	 * Per input side, the toastable attributes several of this node's
+	 * expressions detoast, as for Scan.predetoast_attrs_safe/_all (see
+	 * set_join_predetoast_attrs)
+	 */
+	Bitmapset  *predetoast_outer_safe;
+	Bitmapset  *predetoast_outer_all;
+	Bitmapset  *predetoast_inner_safe;
+	Bitmapset  *predetoast_inner_all;
 } Join;
 
 /* ----------------
@@ -1246,6 +1306,13 @@ typedef struct Agg
 
 	/* chained Agg/Sort nodes */
 	List	   *chain;
+
+	/*
+	 * Input attributes several of the aggregate arguments or quals detoast,
+	 * which the executor may detoast once per input row in the child's slot
+	 * (see set_agg_predetoast_attrs)
+	 */
+	Bitmapset  *predetoast_outer_attrs;
 } Agg;
 
 /* ----------------

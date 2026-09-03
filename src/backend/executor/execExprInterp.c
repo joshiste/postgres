@@ -56,6 +56,7 @@
  */
 #include "postgres.h"
 
+#include "access/detoast.h"
 #include "access/heaptoast.h"
 #include "access/tupconvert.h"
 #include "catalog/pg_type.h"
@@ -494,6 +495,9 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		&&CASE_EEOP_SCAN_VAR,
 		&&CASE_EEOP_OLD_VAR,
 		&&CASE_EEOP_NEW_VAR,
+		&&CASE_EEOP_INNER_VAR_TOAST,
+		&&CASE_EEOP_OUTER_VAR_TOAST,
+		&&CASE_EEOP_SCAN_VAR_TOAST,
 		&&CASE_EEOP_INNER_SYSVAR,
 		&&CASE_EEOP_OUTER_SYSVAR,
 		&&CASE_EEOP_SCAN_SYSVAR,
@@ -725,6 +729,60 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			Assert(attnum >= 0 && attnum < scanslot->tts_nvalid);
 			*op->resvalue = scanslot->tts_values[attnum];
 			*op->resnull = scanslot->tts_isnull[attnum];
+
+			EEO_NEXT();
+		}
+
+		EEO_CASE(EEOP_INNER_VAR_TOAST)
+		{
+			int			attnum = op->d.var.attnum;
+
+			/* only out-of-line or compressed values are worth the call */
+			Assert(attnum >= 0 && attnum < innerslot->tts_nvalid);
+			if (!innerslot->tts_isnull[attnum] &&
+				VARATT_IS_EXTENDED(DatumGetPointer(innerslot->tts_values[attnum])))
+				ExecEvalVarToast(state, op, econtext, innerslot);
+			else
+			{
+				*op->resvalue = innerslot->tts_values[attnum];
+				*op->resnull = innerslot->tts_isnull[attnum];
+			}
+
+			EEO_NEXT();
+		}
+
+		EEO_CASE(EEOP_OUTER_VAR_TOAST)
+		{
+			int			attnum = op->d.var.attnum;
+
+			/* only out-of-line or compressed values are worth the call */
+			Assert(attnum >= 0 && attnum < outerslot->tts_nvalid);
+			if (!outerslot->tts_isnull[attnum] &&
+				VARATT_IS_EXTENDED(DatumGetPointer(outerslot->tts_values[attnum])))
+				ExecEvalVarToast(state, op, econtext, outerslot);
+			else
+			{
+				*op->resvalue = outerslot->tts_values[attnum];
+				*op->resnull = outerslot->tts_isnull[attnum];
+			}
+
+			EEO_NEXT();
+		}
+
+		EEO_CASE(EEOP_SCAN_VAR_TOAST)
+		{
+			int			attnum = op->d.var.attnum;
+
+			/* only out-of-line or compressed values are worth the call */
+			Assert(attnum >= 0 && attnum < scanslot->tts_nvalid);
+			if (!scanslot->tts_isnull[attnum] &&
+				VARATT_IS_EXTENDED(DatumGetPointer(scanslot->tts_values[attnum])))
+				ExecEvalVarToast(state, op, econtext, scanslot);
+			else
+			{
+				*op->resvalue = scanslot->tts_values[attnum];
+				*op->resnull = scanslot->tts_isnull[attnum];
+			}
 
 			EEO_NEXT();
 		}
@@ -5653,6 +5711,48 @@ ExecEvalWholeRowVar(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
 
 	*op->resvalue = PointerGetDatum(dtuple);
 	*op->resnull = false;
+}
+
+/*
+ * Evaluate a Var whose value should be detoasted once and kept in the slot.
+ *
+ * Only out-of-line and compressed values are worth the trouble; short-header
+ * values stay as they are.  The detoasted copy replaces the toast pointer in
+ * tts_values, so every later reference to this attribute in the same node
+ * (and in parents that read the slot directly) sees the plain value.  The
+ * memory lives in the slot's detoast context, which ExecClearTuple and the
+ * ExecStore* functions reset when the slot moves on to another tuple.
+ */
+void
+ExecEvalVarToast(ExprState *state, ExprEvalStep *op, ExprContext *econtext,
+				 TupleTableSlot *slot)
+{
+	int			attnum = op->d.var.attnum;
+
+	Assert(attnum >= 0 && attnum < slot->tts_nvalid);
+
+	if (!slot->tts_isnull[attnum])
+	{
+		varlena    *attr = (varlena *) DatumGetPointer(slot->tts_values[attnum]);
+
+		if (VARATT_IS_EXTERNAL_ONDISK(attr) || VARATT_IS_COMPRESSED(attr))
+		{
+			MemoryContext oldcxt;
+
+			if (unlikely(slot->tts_detoast_cxt == NULL))
+				slot->tts_detoast_cxt =
+					GenerationContextCreate(slot->tts_mcxt,
+											"detoasted slot values",
+											ALLOCSET_DEFAULT_SIZES);
+			oldcxt = MemoryContextSwitchTo(slot->tts_detoast_cxt);
+			attr = detoast_attr(attr);
+			MemoryContextSwitchTo(oldcxt);
+			slot->tts_values[attnum] = PointerGetDatum(attr);
+		}
+	}
+
+	*op->resvalue = slot->tts_values[attnum];
+	*op->resnull = slot->tts_isnull[attnum];
 }
 
 void

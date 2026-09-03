@@ -1376,7 +1376,8 @@ ExecInitMergeJoin(MergeJoin *node, EState *estate, int eflags)
 	Assert(node->join.joinqual == NIL || !node->skip_mark_restore);
 	mergestate->mj_SkipMarkRestore = node->skip_mark_restore;
 
-	outerPlanState(mergestate) = ExecInitNode(outerPlan(node), estate, eflags);
+	outerPlanState(mergestate) = ExecInitNode(outerPlan(node), estate,
+											  EXEC_PASS_ROW_CONSUMER(eflags));
 	outerDesc = ExecGetResultType(outerPlanState(mergestate));
 	innerPlanState(mergestate) = ExecInitNode(innerPlan(node), estate,
 											  mergestate->mj_SkipMarkRestore ?
@@ -1408,6 +1409,7 @@ ExecInitMergeJoin(MergeJoin *node, EState *estate, int eflags)
 	/*
 	 * Initialize result slot, type and projection.
 	 */
+	ExecInitJoinPredetoast(&mergestate->js, eflags, true, false);
 	ExecInitResultTupleSlotTL(&mergestate->js.ps, &TTSOpsVirtual);
 	ExecAssignProjectionInfo(&mergestate->js.ps, NULL);
 

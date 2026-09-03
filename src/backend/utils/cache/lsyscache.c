@@ -1130,6 +1130,34 @@ get_attgenerated(Oid relid, AttrNumber attnum)
 }
 
 /*
+ * get_attstorage
+ *
+ *		Given the relation id and the attribute number,
+ *		return the "attstorage" field from the attribute relation.
+ *
+ *		Errors if not found.
+ */
+char
+get_attstorage(Oid relid, AttrNumber attnum)
+{
+	HeapTuple	tp;
+	Form_pg_attribute att_tup;
+	char		result;
+
+	tp = SearchSysCache2(ATTNUM,
+						 ObjectIdGetDatum(relid),
+						 Int16GetDatum(attnum));
+	if (!HeapTupleIsValid(tp))
+		elog(ERROR, "cache lookup failed for attribute %d of relation %u",
+			 attnum, relid);
+	att_tup = (Form_pg_attribute) GETSTRUCT(tp);
+	result = att_tup->attstorage;
+	ReleaseSysCache(tp);
+
+	return result;
+}
+
+/*
  * get_atttype
  *
  *		Given the relation OID and the attribute number with the relation,

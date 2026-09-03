@@ -123,7 +123,7 @@ ExecInitSubqueryScan(SubqueryScan *node, EState *estate, int eflags)
 	/*
 	 * initialize subquery
 	 */
-	subquerystate->subplan = ExecInitNode(node->subplan, estate, eflags);
+	subquerystate->subplan = ExecInitNode(node->subplan, estate, EXEC_PASS_ROW_CONSUMER(eflags));
 
 	/*
 	 * Initialize scan slot and type (needed by ExecAssignScanProjectionInfo)

@@ -71,6 +71,24 @@
 #define EXEC_FLAG_MARK				0x0010	/* need mark/restore */
 #define EXEC_FLAG_SKIP_TRIGGERS		0x0020	/* skip AfterTrigger setup */
 #define EXEC_FLAG_WITH_NO_DATA		0x0040	/* REFRESH ... WITH NO DATA */
+#define EXEC_FLAG_ROW_CONSUMER		0x0080	/* parent consumes rows one at a
+											 * time */
+#define EXEC_FLAG_GRANT_ROW_CONSUMER 0x0100 /* parent grants ROW_CONSUMER to
+											 * child */
+
+/*
+ * A node whose parent consumes its output one row at a time without ever
+ * storing a copy of a projected tuple (Result, Limit, NestLoop, ...) may
+ * detoast toasted scan-slot values in place, since the detoasted value can
+ * never end up inside a stored tuple.  ExecInitNode strips ROW_CONSUMER from
+ * the flags it hands to a child and sets it only when the parent passed
+ * GRANT_ROW_CONSUMER, so nodes that do store tuples (Sort, Hash, Agg, ...)
+ * need no code: passing their own eflags through denies by default.  Parents
+ * that consume rows one at a time forward the permission they hold with
+ * EXEC_PASS_ROW_CONSUMER().
+ */
+#define EXEC_PASS_ROW_CONSUMER(eflags) \
+	((eflags) | (((eflags) & EXEC_FLAG_ROW_CONSUMER) ? EXEC_FLAG_GRANT_ROW_CONSUMER : 0))
 
 
 /* Hook for plugins to get control in ExecutorStart() */
@@ -584,6 +602,12 @@ extern Datum ExecMakeFunctionResultSet(SetExprState *fcache,
 /*
  * prototypes from functions in execScan.c
  */
+extern PGDLLIMPORT bool shared_detoast;
+extern Bitmapset *ExecScanPredetoastAttrs(ScanState *node, TupleDesc tupdesc,
+										  int eflags);
+extern void ExecInitJoinPredetoast(JoinState *js, int eflags, bool outer_ok,
+								   bool inner_ok);
+
 typedef TupleTableSlot *(*ExecScanAccessMtd) (ScanState *node);
 typedef bool (*ExecScanRecheckMtd) (ScanState *node, TupleTableSlot *slot);
 
@@ -686,6 +710,8 @@ extern const TupleTableSlotOps *ExecGetCommonSlotOps(PlanState **planstates,
 extern const TupleTableSlotOps *ExecGetCommonChildSlotOps(PlanState *ps);
 extern void ExecAssignProjectionInfo(PlanState *planstate,
 									 TupleDesc inputDesc);
+extern bool tlist_matches_tupdesc(PlanState *ps, List *tlist, int varno,
+								  TupleDesc tupdesc);
 extern void ExecConditionalAssignProjectionInfo(PlanState *planstate,
 												TupleDesc inputDesc, int varno);
 extern void ExecAssignScanType(ScanState *scanstate, TupleDesc tupDesc);

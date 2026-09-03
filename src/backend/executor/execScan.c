@@ -154,3 +154,81 @@ ExecScanReScan(ScanState *node)
 		}
 	}
 }
+
+
+/* Detoast a toasted column once per row when several expressions reference it */
+bool		shared_detoast = true;
+
+/*
+ * ExecScanPredetoastAttrs
+ *
+ * Which scan-slot attributes this node may detoast in place.  The planner
+ * recorded the candidates (see set_scan_predetoast_attrs); what remains here
+ * is the part only the executor knows.  A detoasted value written back into
+ * the scan slot is visible to any parent that reads the slot or a projection
+ * of it, which is harmless as long as it never gets copied into a stored
+ * tuple.  With EXEC_FLAG_ROW_CONSUMER the parent chain guarantees that, so
+ * every candidate qualifies; otherwise only attributes that leave the node
+ * inside expression results do, and a node without projection, which hands
+ * its whole scan slot to the parent, gets what the planner found safe for
+ * that particular parent.
+ */
+Bitmapset *
+ExecScanPredetoastAttrs(ScanState *node, TupleDesc tupdesc, int eflags)
+{
+	Plan	   *plan = node->ps.plan;
+	Scan	   *scan = (Scan *) plan;
+	int			varno;
+
+	/* Agg, Sort and others embed a ScanState too; only real scans qualify */
+	if (!shared_detoast || tupdesc == NULL || !IsScanPlan(plan))
+		return NULL;
+	if (scan->predetoast_attrs_all == NULL)
+		return NULL;
+
+	if (eflags & EXEC_FLAG_ROW_CONSUMER)
+		return scan->predetoast_attrs_all;
+	if (scan->predetoast_attrs_safe == NULL && scan->predetoast_attrs_noproj == NULL)
+		return NULL;
+
+	/*
+	 * The targetlist of an index-only scan, and of a foreign or custom scan
+	 * that replaces a join or upper relation (scanrelid == 0), refers to the
+	 * scan tuple through INDEX_VAR; everything else uses the scan's own
+	 * varno.
+	 */
+	if (IsA(plan, IndexOnlyScan) || scan->scanrelid == 0)
+		varno = INDEX_VAR;
+	else
+		varno = scan->scanrelid;
+
+	if (tlist_matches_tupdesc(&node->ps, plan->targetlist, varno, tupdesc))
+		return scan->predetoast_attrs_noproj;	/* whole slot is passed up */
+
+	return scan->predetoast_attrs_safe;
+}
+
+/*
+ * ExecInitJoinPredetoast
+ *
+ * Join counterpart of ExecScanPredetoastAttrs: choose, per input side, the
+ * planner-recorded set the join's expressions may detoast in place.  Joins
+ * always project, so without EXEC_FLAG_ROW_CONSUMER the safe set applies.
+ * The caller says which sides are eligible; a side whose tuples the node
+ * itself copies (MergeJoin's marked inner tuple) is not.
+ */
+void
+ExecInitJoinPredetoast(JoinState *js, int eflags, bool outer_ok, bool inner_ok)
+{
+	Join	   *join = (Join *) js->ps.plan;
+	bool		permitted = (eflags & EXEC_FLAG_ROW_CONSUMER) != 0;
+
+	if (!shared_detoast)
+		return;
+	if (outer_ok)
+		js->ps.ps_predetoast_outerattrs =
+			permitted ? join->predetoast_outer_all : join->predetoast_outer_safe;
+	if (inner_ok)
+		js->ps.ps_predetoast_innerattrs =
+			permitted ? join->predetoast_inner_all : join->predetoast_inner_safe;
+}
