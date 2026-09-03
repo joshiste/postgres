@@ -226,12 +226,15 @@ pull_multi_detoast_vars() (clauses.c) does the counting and the veto; get_attsto
 - Audit every writer/reader of tts_values for heap, buffer-heap and minimal slots
   (materialize, copyslot, getsomeattrs, EPQ slots, trigger old/new slots, RETURNING)
   and every tts_nvalid = 0 site.
-- Add INJECTION_POINT("detoast-attr-external") in detoast_attr and build a regress
-  test module src/test/modules/test_shared_detoast that attaches it with the notice
-  action, so expected output shows exactly how many detoasts each query performs
-  (covers all Phase 0 guard cases; conditional on injection points like test_aio).
-- EXPLAIN (VERBOSE) line "Pre-detoast: col1, col2" per scan node; both deciders make
-  this available at EXPLAIN time since EXPLAIN runs ExecutorStart.
+- Done 2026-09-03 (8b3e63761c): injection points detoast-attr-external and
+  detoast-attr-compressed in detoast_attr; module src/test/modules/test_shared_detoast
+  pins detoast counts per query shape (19 notices over the suite). Parallel workers
+  cannot be observed this way (locally attached points are per process), the guard
+  suite covers them via buffer counts.
+- Done 2026-09-03: EXPLAIN (VERBOSE) prints "Pre-detoast: col, ..." per scan node from
+  PlanState.ps_predetoast_scanattrs.
+- Found while writing the module: length(text) detoasts fully in multibyte encodings,
+  so it left the no-detoast function list; octet_length stays.
 - UPDATE toast identity test and a wal_consistency_checking run of the regression
   suite.
 
