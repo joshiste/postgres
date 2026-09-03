@@ -6810,7 +6810,8 @@ func_reads_raw_representation(Oid funcid)
  * Functions that read at most a prefix or the size of a varlena argument
  * (pg_detoast_datum_slice, toast_raw_datum_size) rather than the whole
  * value.  A Var passed directly to one of these is not a detoasting
- * reference.
+ * reference.  length(text) is not among them: it counts characters, which
+ * needs the whole value in a multibyte encoding.
  */
 static bool
 func_reads_slice_or_size(Oid funcid)
@@ -6832,8 +6833,6 @@ func_reads_slice_or_size(Oid funcid)
 		case F_OVERLAY_TEXT_TEXT_INT4_INT4:
 		case F_OVERLAY_BYTEA_BYTEA_INT4:
 		case F_OVERLAY_BYTEA_BYTEA_INT4_INT4:
-		case F_LENGTH_TEXT:
-		case F_TEXTLEN:
 		case F_OCTET_LENGTH_TEXT:
 		case F_OCTET_LENGTH_BYTEA:
 		case F_LENGTH_BYTEA:

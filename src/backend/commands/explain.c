@@ -89,6 +89,7 @@ static void show_qual(List *qual, const char *qlabel,
 static void show_scan_qual(List *qual, const char *qlabel,
 						   PlanState *planstate, List *ancestors,
 						   ExplainState *es);
+static void show_predetoast_attrs(PlanState *planstate, ExplainState *es);
 static void show_upper_qual(List *qual, const char *qlabel,
 							PlanState *planstate, List *ancestors,
 							ExplainState *es);
@@ -2298,6 +2299,10 @@ ExplainNode(PlanState *planstate, List *ancestors,
 		}
 	}
 
+	/* Show scan-slot attributes detoasted in place */
+	if (es->verbose && planstate->ps_predetoast_scanattrs)
+		show_predetoast_attrs(planstate, es);
+
 	/* Show buffer/WAL usage */
 	if (es->buffers && planstate->instrument)
 		show_buffer_usage(es, &planstate->instrument->instr.bufusage);
@@ -2548,6 +2553,23 @@ show_qual(List *qual, const char *qlabel,
 
 	/* And show it */
 	show_expression(node, qlabel, planstate, ancestors, useprefix, es);
+}
+
+/*
+ * Show which scan-slot attributes a scan node detoasts once per row
+ */
+static void
+show_predetoast_attrs(PlanState *planstate, ExplainState *es)
+{
+	TupleDesc	desc = planstate->scandesc;
+	List	   *names = NIL;
+	int			attno = -1;
+
+	if (desc == NULL)
+		return;
+	while ((attno = bms_next_member(planstate->ps_predetoast_scanattrs, attno)) >= 0)
+		names = lappend(names, NameStr(TupleDescAttr(desc, attno - 1)->attname));
+	ExplainPropertyList("Pre-detoast", names, es);
 }
 
 /*
