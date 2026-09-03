@@ -223,9 +223,32 @@ picks all with EXEC_FLAG_ROW_CONSUMER, safe when the node projects, none otherwi
 pull_multi_detoast_vars() (clauses.c) does the counting and the veto; get_attstorage()
 (lsyscache.c, new) supplies column storage for toastability.
 
-- Audit every writer/reader of tts_values for heap, buffer-heap and minimal slots
-  (materialize, copyslot, getsomeattrs, EPQ slots, trigger old/new slots, RETURNING)
-  and every tts_nvalid = 0 site.
+- Audit done 2026-09-03. Where a detoasted value written into a scan slot can travel:
+  - Copies out of a slot: tts_heap/buffer_heap/minimal_copyslot and the copy_*_tuple
+    ops copy the physical tuple, never tts_values, so they cannot carry the fat value.
+    Only tts_virtual_copyslot/copy_*_tuple form tuples from tts_values, and a virtual
+    slot only holds the fat value if a projection put a bare Var there, which the
+    permission rule denies unless the parent chain consumes rows one at a time.
+  - SubqueryScan: its scan slot is the child's result slot, so the fat value lands in
+    the child's projection slot; that slot is cleared by ExecProject every row (reset)
+    and is only ever copied by the SubqueryScan's own projection (rule applies there).
+  - EPQ: ExecScanFetch returns the EPQ substitute slot as the scan tuple; the step
+    writes into that slot (heap slot, reset on next store/clear), EvalPlanQualEnd
+    clears it. LockRows passes rows through and is allowed to grant permission.
+  - ModifyTable: UPDATE builds the new tuple from the old tuple fetched by tid into
+    ri_oldTupleSlot, not from the scan slot; the guard and module tests confirm the
+    toast pointer survives. ModifyTable does not grant permission, so bare-projected
+    columns keep their pointers on INSERT ... SELECT.
+  - Materialize inside slot ops (tts_*_materialize) resets tts_nvalid without
+    resetting the detoast context: the fat copy is orphaned until the next
+    store/clear, bounded by one row; harmless, noted.
+  - Whole-row Vars of a physical scan slot go through the physical tuple; of a virtual
+    slot through heap_form_tuple, again only bare projections, denied as above.
+  - ForeignScan/CustomScan/ValuesScan/FunctionScan slots never hold on-disk toast
+    pointers except via tuplestores of heap tuples (CTE-like), where the minimal slot
+    behaves like any other physical slot.
+  Every tts_nvalid = 0 site outside slot ops is a generic wrapper that resets the
+  context (Phase 1); the ops-internal ones are the materialize cases above.
 - Done 2026-09-03 (8b3e63761c): injection points detoast-attr-external and
   detoast-attr-compressed in detoast_attr; module src/test/modules/test_shared_detoast
   pins detoast counts per query shape (19 notices over the suite). Parallel workers
