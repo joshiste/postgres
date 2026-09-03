@@ -8,10 +8,16 @@ Both contenders sit on `detoast-base`; only the decider differs.
 
 | check                                                     | base | A exec | B plan |
 |-----------------------------------------------------------|------|--------|--------|
-| guard suite, mode=master on cassert build (all ok)        | 28/28 |        |        |
-| guard suite, mode=patched phase=1 on cassert build        | n/a  |        |        |
-| check-world, cassert build                                | see baseline |  |     |
-| toast pointer identity kept after UPDATE (case 24)        | yes  |        |        |
+| guard suite, mode=master on cassert build (all ok)        | 28/28 | n/a (15 wins deviate) | n/a (15 wins deviate) |
+| guard suite, mode=patched phase=1 on cassert build        | n/a  | 28/28  | 28/28  |
+| check-world, cassert build                                | pass | pass (after base varno fix 8bc5ebbd61) | pass (same) |
+| toast pointer identity kept after UPDATE (case 24)        | yes  | yes    | yes    |
+
+The first check-world run of A and B failed identically: tlist_matches_tupdesc()
+asserted on INDEX_VAR targetlists (index-only scans, pushed-down foreign joins). The
+bug was in the base but unreachable with the empty decision hook, so only the
+deciders exposed it; the Mac build has no cassert and the guard suite has no such
+plan shape. Fixed in the base, both reran clean.
 
 ## Criterion 1: init overhead (user-space instructions per iteration, perfbench.sh)
 
