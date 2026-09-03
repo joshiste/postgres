@@ -1322,10 +1322,11 @@ select (ss.a).x, (ss.a).n from
 ------------------------------------------------------------------------
  Subquery Scan on ss
    Output: (ss.a).x, (ss.a).n
+   Pre-detoast: a
    ->  ProjectSet
          Output: information_schema._pg_expandarray('{1,2}'::integer[])
          ->  Result
-(5 rows)
+(6 rows)
 
 explain (verbose, costs off)
 select (ss.a).x, (ss.a).n from

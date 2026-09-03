@@ -3005,6 +3005,8 @@ select * from x;
            ->  Nested Loop
                  Output: (z.a || z1.a)
                  Join Filter: (length((z.a || z1.a)) < 5)
+                 Pre-detoast Outer: z.a
+                 Pre-detoast Inner: z1.a
                  CTE z
                    ->  WorkTable Scan on x x_1
                          Output: x_1.a
@@ -3012,7 +3014,7 @@ select * from x;
                        Output: z.a
                  ->  CTE Scan on z z1
                        Output: z1.a
-(16 rows)
+(18 rows)
 
 with recursive x(a) as
   ((values ('a'), ('b'))
