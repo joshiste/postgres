@@ -306,7 +306,7 @@ Benefit: covers the case where the planner pushes the jsonb predicates into join
 quals or the projection happens above a join, which is common once more than one
 table is involved.
 
-### Phase 5: overhead and polish (in progress 2026-09-03)
+### Phase 5: overhead and polish (done 2026-09-03)
 
 - No-op path: per-symbol perf profile of base vs B2 on the no-help statement shows
   ExecScanPredetoastAttrs at 0.11% of user instructions, i.e. the +27 per execution
@@ -330,7 +330,8 @@ table is involved.
   detoast-plan2): 1) the feature (33 files, +932/-15), 2) injection points, test
   module and EXPLAIN expected outputs, 3) the GUC doc, 4) these development notes
   (drop before any submission). `detoast-plan2` keeps the full development history.
-- Remaining: no-cassert check-world result from the VM.
+- No-cassert check-world (VM perf build, lz4, injection points): clean, 2026-09-03.
+  Phase 5 closed.
 
 ### Phase 6 (optional): widen coverage
 
