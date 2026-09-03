@@ -14,13 +14,12 @@
 -- Each case carries the value master must produce (mode=master, the default) and
 -- the value a correct shared-detoast implementation must produce (mode=patched).
 -- A NULL target means "must not change". Cases marked "same" in target are the
--- regression guards; cases with a lower target are the wins. Cases 20-21 are
--- Phase 4 (joins) targets and are expected to still show master values after
--- Phase 1; run with -v phase=1 to score them as "same". Case 17 (HashAgg
--- directly above a scan that therefore has no projection) is a Phase 5 target:
--- the eflags permission rule cannot see that hash aggregation stores only the
--- grouping column. Case 23: one detoast saves 133 heap + 3 toast index blocks
--- in the EXPLAIN buffer counts.
+-- regression guards; cases with a lower target are the wins. Cases 20-21 (joins)
+-- carry min_phase 4: run with -v phase=1 to score them as "same" against a build
+-- that only handles scans. Case 17 (HashAgg directly above a scan that therefore
+-- has no projection) is a Phase 5 target: the eflags permission rule cannot see
+-- that hash aggregation stores only the grouping column. Case 23: one detoast
+-- saves 133 heap + 3 toast index blocks in the EXPLAIN buffer counts.
 --
 -- Not covered here, deferred to the injection-point test module: holdable
 -- cursors (need transaction control), Memoize (needs a repeating outer side),
