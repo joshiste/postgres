@@ -94,6 +94,21 @@ SET enable_nestloop = off; SET enable_mergejoin = off;
 SELECT count(*) FROM sd p JOIN sd2 q ON p.doc = q.doc WHERE p.doc ? 'a' AND p.doc @> '{"b": 2}';
 RESET enable_nestloop; RESET enable_mergejoin;
 DROP TABLE sd2;
+-- a scan without projection under a parent that copies the physical tuple
+-- (Sort, hashed Agg over other columns) still detoasts once
+WITH s AS MATERIALIZED (SELECT * FROM sd WHERE doc ? 'a' AND doc @> '{"b": 2}' ORDER BY id)
+SELECT count(*) FROM s;
+SET enable_sort = off;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT count(*) FROM sd WHERE doc ? 'a' AND doc @> '{"b": 2}' GROUP BY id;
+SELECT count(*) FROM sd WHERE doc ? 'a' AND doc @> '{"b": 2}' GROUP BY id;
+-- but a hashed grouping column is copied out of the slot, so it is left alone
+SELECT count(*) FROM sd WHERE doc ? 'a' AND doc @> '{"b": 2}' GROUP BY doc;
+RESET enable_sort;
+-- aggregate arguments referencing the same input column detoast it once
+EXPLAIN (VERBOSE, COSTS OFF) SELECT sum((doc->>'a')::int), sum((doc->>'b')::int) FROM sd;
+SELECT sum((doc->>'a')::int), sum((doc->>'b')::int) FROM sd;
+-- unless the column itself is an aggregate argument, whose state may keep it
+SELECT sum((doc->>'a')::int), sum((doc->>'b')::int), count(doc) FROM sd;
 -- an inline column never detoasts
 SELECT small->'a', small->'b' FROM sd;
 -- switching the feature off restores one detoast per reference

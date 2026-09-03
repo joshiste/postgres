@@ -553,6 +553,13 @@ typedef struct Scan
 	 */
 	Bitmapset  *predetoast_attrs_safe;
 	Bitmapset  *predetoast_attrs_all;
+
+	/*
+	 * The subset usable when this node hands its whole scan slot to the
+	 * parent (no projection), decided from what that parent does with the
+	 * slot (see set_child_predetoast_noproj)
+	 */
+	Bitmapset  *predetoast_attrs_noproj;
 } Scan;
 
 /*
@@ -1299,6 +1306,13 @@ typedef struct Agg
 
 	/* chained Agg/Sort nodes */
 	List	   *chain;
+
+	/*
+	 * Input attributes several of the aggregate arguments or quals detoast,
+	 * which the executor may detoast once per input row in the child's slot
+	 * (see set_agg_predetoast_attrs)
+	 */
+	Bitmapset  *predetoast_outer_attrs;
 } Agg;
 
 /* ----------------

@@ -170,7 +170,8 @@ bool		shared_detoast = true;
  * tuple.  With EXEC_FLAG_ROW_CONSUMER the parent chain guarantees that, so
  * every candidate qualifies; otherwise only attributes that leave the node
  * inside expression results do, and a node without projection, which hands
- * its whole scan slot to the parent, gets none.
+ * its whole scan slot to the parent, gets what the planner found safe for
+ * that particular parent.
  */
 Bitmapset *
 ExecScanPredetoastAttrs(ScanState *node, TupleDesc tupdesc, int eflags)
@@ -187,7 +188,7 @@ ExecScanPredetoastAttrs(ScanState *node, TupleDesc tupdesc, int eflags)
 
 	if (eflags & EXEC_FLAG_ROW_CONSUMER)
 		return scan->predetoast_attrs_all;
-	if (scan->predetoast_attrs_safe == NULL)
+	if (scan->predetoast_attrs_safe == NULL && scan->predetoast_attrs_noproj == NULL)
 		return NULL;
 
 	/*
@@ -202,7 +203,7 @@ ExecScanPredetoastAttrs(ScanState *node, TupleDesc tupdesc, int eflags)
 		varno = scan->scanrelid;
 
 	if (tlist_matches_tupdesc(&node->ps, plan->targetlist, varno, tupdesc))
-		return NULL;			/* no projection: the whole slot is passed up */
+		return scan->predetoast_attrs_noproj;	/* whole slot is passed up */
 
 	return scan->predetoast_attrs_safe;
 }

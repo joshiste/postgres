@@ -271,6 +271,74 @@ NOTICE:  notice triggered for injection point detoast-attr-external
 
 RESET enable_nestloop; RESET enable_mergejoin;
 DROP TABLE sd2;
+-- a scan without projection under a parent that copies the physical tuple
+-- (Sort, hashed Agg over other columns) still detoasts once
+WITH s AS MATERIALIZED (SELECT * FROM sd WHERE doc ? 'a' AND doc @> '{"b": 2}' ORDER BY id)
+SELECT count(*) FROM s;
+NOTICE:  notice triggered for injection point detoast-attr-external
+ count 
+-------
+     1
+(1 row)
+
+SET enable_sort = off;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT count(*) FROM sd WHERE doc ? 'a' AND doc @> '{"b": 2}' GROUP BY id;
+                                QUERY PLAN                                
+--------------------------------------------------------------------------
+ HashAggregate
+   Output: count(*), id
+   Group Key: sd.id
+   ->  Seq Scan on public.sd
+         Output: id, doc, small, txt, ctxt
+         Filter: ((sd.doc ? 'a'::text) AND (sd.doc @> '{"b": 2}'::jsonb))
+         Pre-detoast: doc
+(7 rows)
+
+SELECT count(*) FROM sd WHERE doc ? 'a' AND doc @> '{"b": 2}' GROUP BY id;
+NOTICE:  notice triggered for injection point detoast-attr-external
+ count 
+-------
+     1
+(1 row)
+
+-- but a hashed grouping column is copied out of the slot, so it is left alone
+SELECT count(*) FROM sd WHERE doc ? 'a' AND doc @> '{"b": 2}' GROUP BY doc;
+NOTICE:  notice triggered for injection point detoast-attr-external
+NOTICE:  notice triggered for injection point detoast-attr-external
+NOTICE:  notice triggered for injection point detoast-attr-external
+ count 
+-------
+     1
+(1 row)
+
+RESET enable_sort;
+-- aggregate arguments referencing the same input column detoast it once
+EXPLAIN (VERBOSE, COSTS OFF) SELECT sum((doc->>'a')::int), sum((doc->>'b')::int) FROM sd;
+                                     QUERY PLAN                                     
+------------------------------------------------------------------------------------
+ Aggregate
+   Output: sum(((doc ->> 'a'::text))::integer), sum(((doc ->> 'b'::text))::integer)
+   Pre-detoast Outer: sd.doc
+   ->  Seq Scan on public.sd
+         Output: id, doc, small, txt, ctxt
+(5 rows)
+
+SELECT sum((doc->>'a')::int), sum((doc->>'b')::int) FROM sd;
+NOTICE:  notice triggered for injection point detoast-attr-external
+ sum | sum 
+-----+-----
+   1 |   2
+(1 row)
+
+-- unless the column itself is an aggregate argument, whose state may keep it
+SELECT sum((doc->>'a')::int), sum((doc->>'b')::int), count(doc) FROM sd;
+NOTICE:  notice triggered for injection point detoast-attr-external
+NOTICE:  notice triggered for injection point detoast-attr-external
+ sum | sum | count 
+-----+-----+-------
+   1 |   2 |     1
+(1 row)
+
 -- an inline column never detoasts
 SELECT small->'a', small->'b' FROM sd;
  ?column? | ?column? 

@@ -138,6 +138,8 @@ static void add_rte_to_flat_rtable(PlannerGlobal *glob, List *rteperminfos,
 static Plan *set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset);
 static void set_scan_predetoast_attrs(PlannerInfo *root, Scan *scan);
 static void set_join_predetoast_attrs(Join *join);
+static void set_agg_predetoast_attrs(Agg *agg);
+static void set_child_predetoast_noproj(Plan *parent, Plan *child, Index side);
 static Plan *set_indexonlyscan_references(PlannerInfo *root,
 										  IndexOnlyScan *plan,
 										  int rtoffset);
@@ -656,6 +658,7 @@ set_scan_predetoast_attrs(PlannerInfo *root, Scan *scan)
 
 	scan->predetoast_attrs_safe = NULL;
 	scan->predetoast_attrs_all = NULL;
+	scan->predetoast_attrs_noproj = NULL;
 
 	vars = pull_multi_detoast_vars(plan->targetlist, plan->qual, 0);
 	if (vars == NIL)
@@ -785,6 +788,178 @@ set_join_predetoast_attrs(Join *join)
 	}
 	list_free(quals);
 	list_free(keyvars);
+}
+
+/*
+ * bare_vars_of_side
+ *		Attribute numbers of plain Vars of the given varno in a targetlist.
+ */
+static Bitmapset *
+bare_vars_of_side(List *targetlist, Index varno)
+{
+	Bitmapset  *result = NULL;
+	ListCell   *lc;
+
+	foreach(lc, targetlist)
+	{
+		TargetEntry *tle = (TargetEntry *) lfirst(lc);
+		Var		   *var = (Var *) tle->expr;
+
+		if (IsA(var, Var) && var->varno == varno && var->varattno > 0)
+			result = bms_add_member(result, var->varattno);
+	}
+	return result;
+}
+
+/*
+ * set_agg_predetoast_attrs
+ *		Same as set_join_predetoast_attrs, for the input of an Agg node:
+ *		aggregate arguments and quals that detoast the same input column
+ *		more than once.
+ *
+ * Grouping columns are excluded because hashed aggregation copies them out
+ * of the input slot's values, and so is any column passed whole to an
+ * aggregate, whose transition state might keep the datum.  Grouping sets
+ * and mixed strategies are left alone.
+ */
+static void
+set_agg_predetoast_attrs(Agg *agg)
+{
+	Plan	   *plan = &agg->plan;
+	List	   *vars;
+	List	   *aggrefs;
+	Bitmapset  *attrs = NULL;
+	Bitmapset  *excluded;
+	ListCell   *lc;
+
+	agg->predetoast_outer_attrs = NULL;
+	if (agg->aggstrategy == AGG_MIXED || agg->groupingSets != NIL ||
+		agg->chain != NIL)
+		return;
+
+	vars = pull_multi_detoast_vars(plan->targetlist, plan->qual, OUTER_VAR);
+	foreach(lc, vars)
+	{
+		Var		   *var = (Var *) lfirst(lc);
+
+		if (get_typlen(var->vartype) == -1 &&
+			get_typstorage(var->vartype) != TYPSTORAGE_PLAIN)
+			attrs = bms_add_member(attrs, var->varattno);
+	}
+	list_free(vars);
+	if (attrs == NULL)
+		return;
+
+	excluded = bare_vars_of_side(plan->targetlist, OUTER_VAR);
+	for (int i = 0; i < agg->numCols; i++)
+		excluded = bms_add_member(excluded, agg->grpColIdx[i]);
+	aggrefs = pull_var_clause((Node *) plan->targetlist, PVC_INCLUDE_AGGREGATES);
+	aggrefs = list_concat(aggrefs,
+						  pull_var_clause((Node *) plan->qual,
+										  PVC_INCLUDE_AGGREGATES));
+	foreach(lc, aggrefs)
+	{
+		Aggref	   *aggref = (Aggref *) lfirst(lc);
+		ListCell   *alc;
+
+		if (!IsA(aggref, Aggref))
+			continue;
+		foreach(alc, aggref->args)
+		{
+			Node	   *arg = (Node *) ((TargetEntry *) lfirst(alc))->expr;
+
+			while (IsA(arg, RelabelType))
+				arg = (Node *) ((RelabelType *) arg)->arg;
+			if (IsA(arg, Var) && ((Var *) arg)->varno == OUTER_VAR &&
+				((Var *) arg)->varattno > 0)
+				excluded = bms_add_member(excluded, ((Var *) arg)->varattno);
+		}
+	}
+	list_free(aggrefs);
+
+	agg->predetoast_outer_attrs = bms_difference(attrs, excluded);
+	bms_free(attrs);
+	bms_free(excluded);
+}
+
+/*
+ * set_child_predetoast_noproj
+ *		Decide which of a scan's pre-detoast candidates stay usable when the
+ *		scan projects nothing and hands its whole slot to this parent.
+ *
+ * The slot of these scan types holds a physical tuple, and a parent that
+ * stores such a slot copies the tuple, never the detoasted values in the
+ * slot's arrays.  Only two things can carry a detoasted value onward: a
+ * parent that projects it as a bare Var into a virtual slot, and hashed
+ * aggregation, which copies its grouping columns out of the values.  Any
+ * other parent is treated as unknown and gets nothing.
+ */
+static void
+set_child_predetoast_noproj(Plan *parent, Plan *child, Index side)
+{
+	Scan	   *scan = (Scan *) child;
+	Bitmapset  *result;
+
+	if (child == NULL || !IsScanPlan(child) || scan->predetoast_attrs_all == NULL)
+		return;
+
+	switch (nodeTag(child))
+	{
+		case T_IndexOnlyScan:	/* virtual slot */
+		case T_ValuesScan:
+		case T_SubqueryScan:	/* the subquery's result slot */
+		case T_CustomScan:		/* slot type up to the provider */
+			return;
+		default:
+			break;
+	}
+
+	result = bms_copy(scan->predetoast_attrs_all);
+	switch (nodeTag(parent))
+	{
+		case T_Sort:
+		case T_IncrementalSort:
+		case T_Material:
+		case T_Memoize:
+		case T_Hash:
+		case T_Unique:
+		case T_Group:
+		case T_Gather:
+		case T_GatherMerge:
+		case T_WindowAgg:
+		case T_SetOp:
+		case T_RecursiveUnion:
+			break;
+		case T_Agg:
+			{
+				Agg		   *agg = (Agg *) parent;
+
+				if (agg->aggstrategy == AGG_MIXED || agg->groupingSets != NIL)
+					result = NULL;
+				else if (agg->aggstrategy == AGG_HASHED)
+					for (int i = 0; i < agg->numCols; i++)
+						result = bms_del_member(result, agg->grpColIdx[i]);
+				break;
+			}
+		case T_Result:
+		case T_ProjectSet:
+		case T_NestLoop:
+		case T_HashJoin:
+			result = bms_del_members(result,
+									 bare_vars_of_side(parent->targetlist, side));
+			break;
+		case T_MergeJoin:
+			if (side == OUTER_VAR)
+				result = bms_del_members(result,
+										 bare_vars_of_side(parent->targetlist, side));
+			else
+				result = NULL;
+			break;
+		default:
+			result = NULL;
+			break;
+	}
+	scan->predetoast_attrs_noproj = result;
 }
 
 /*
@@ -1144,6 +1319,7 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 				}
 
 				set_upper_references(root, plan, rtoffset);
+				set_agg_predetoast_attrs(agg);
 			}
 			break;
 		case T_Group:
@@ -1521,6 +1697,9 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 	 */
 	plan->lefttree = set_plan_refs(root, plan->lefttree, rtoffset);
 	plan->righttree = set_plan_refs(root, plan->righttree, rtoffset);
+
+	set_child_predetoast_noproj(plan, plan->lefttree, OUTER_VAR);
+	set_child_predetoast_noproj(plan, plan->righttree, INNER_VAR);
 
 	return plan;
 }
