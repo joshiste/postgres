@@ -324,8 +324,13 @@ table is involved.
 - GUC: kept as a developer option, documented in config.sgml (52537cdc1a).
 - Expected-output churn: the Pre-detoast line appears in domain, rowtypes, subselect,
   join and postgres_fdw; updated.
-- Remaining: doc validation and no-cassert check-world on the VM (running), then a
-  final pgindent pass over the branch and a squash into reviewable commits.
+- Doc validation (xmllint) clean on the VM after installing DocBook tooling.
+- pgindent --check clean over every C file the branch touched; no leftover markers.
+- Reviewable series assembled on branch `shared-detoast` (tree identical to
+  detoast-plan2): 1) the feature (33 files, +932/-15), 2) injection points, test
+  module and EXPLAIN expected outputs, 3) the GUC doc, 4) these development notes
+  (drop before any submission). `detoast-plan2` keeps the full development history.
+- Remaining: no-cassert check-world result from the VM.
 
 ### Phase 6 (optional): widen coverage
 
