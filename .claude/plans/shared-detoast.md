@@ -306,22 +306,26 @@ Benefit: covers the case where the planner pushes the jsonb predicates into join
 quals or the projection happens above a join, which is common once more than one
 table is involved.
 
-### Phase 5: overhead and polish
+### Phase 5: overhead and polish (in progress 2026-09-03)
 
-- Re-run the no-op microbenchmark on the final tree; if a cost is visible, add the
-  early exit "no toastable attribute in tupdesc" (A) or verify the field copy cost (B).
-- Detoast intermediates: if detoast_attr via MemoryContextSwitchTo leaves chunk-fetch
-  garbage in the slot context, switch to a context-parameter variant.
-- Use the denied-candidate count from the race to decide whether cross-node precision
-  (parent's actual use of a projected attribute, v10's forbid-list idea) is worth a
-  follow-up.
-- Decide the GUC's fate: keep as developer option or remove.
-- pgindent, headerscheck, cpluspluscheck, full check-world with and without JIT,
-  with and without cassert, with -Dinjection_points on and off.
-
-Benefit: the patch is regression-free on the paths it does not help, which is the
-single condition every prior attempt failed to prove, and any remaining precision gap
-is quantified rather than guessed.
+- No-op path: per-symbol perf profile of base vs B2 on the no-help statement shows
+  ExecScanPredetoastAttrs at 0.11% of user instructions, i.e. the +27 per execution
+  measured; one call per scan node per start (GUC check, IsScanPlan switch, two field
+  loads). Left as is; everything else in the profile is sampling noise.
+- Detoast intermediates: detoast_attr runs with the slot's detoast context current, so
+  the toast index scan's descriptors and, for compressed values, the fetched compressed
+  copy land there too. Generation context: the compressed copy is pfree'd (its own
+  block, freed at once), the small allocations die at the next row's reset. Accepted;
+  a context-parameter variant of detoast_attr is not needed.
+- Denied candidates in the guard suite (criterion 2): 2 of 30 cases, both by design:
+  case 15 (bare doc under Sort) and case 17 (HashAgg directly above the scan).
+- headerscheck / cpluspluscheck on the Mac: only failures are missing Python, Perl
+  and LLVM headers of an untooled build; nothing from the changed headers.
+- GUC: kept as a developer option, documented in config.sgml (52537cdc1a).
+- Expected-output churn: the Pre-detoast line appears in domain, rowtypes, subselect,
+  join and postgres_fdw; updated.
+- Remaining: doc validation and no-cassert check-world on the VM (running), then a
+  final pgindent pass over the branch and a squash into reviewable commits.
 
 ### Phase 6 (optional): widen coverage
 
