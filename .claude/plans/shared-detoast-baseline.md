@@ -66,3 +66,16 @@ instructions and as a fraction of base.
   loop_noop 24,155 (+27 vs master), loop_jsonb 32,366 (-8), loop_wide 5,089,749
   (-10,416, -0.2%). The negative deltas are layout effects of the header change; the
   +27 is the mechanism's own cost on a statement it cannot help.
+
+## B2 with joins (92bec0f69d), eddie-debian, 2026-09-03
+
+| workload   | master | base   | B2     | B2+joins | B2+joins vs base |
+|------------|-------:|-------:|-------:|---------:|-----------------:|
+| loop_noop  | 24,128 | 24,156 | 24,174 |   24,185 |              +29 |
+| loop_jsonb | 32,374 | 32,375 | 32,386 |   32,474 |              +99 |
+| loop_wide  | 5,100,165 | 5,074,017 | 5,033,261 | 5,047,800 |   -26,217 |
+
+No join in these statements, so the +11/+88 over B2 is layout movement from the new
+interpreter cases and PlanState fields, the same magnitude seen between master and
+base. Guard 30/30 at phase 4 on the cassert build, identity kept; check-world clean;
+wal_consistency_checking regression clean; forced-JIT regression and module clean.

@@ -272,7 +272,7 @@ Benefit: the two failure modes reviewers feared, fat tuples in materializing nod
 and semantic change for raw readers, are covered by deterministic tests, and the
 behaviour is visible in EXPLAIN.
 
-### Phase 4: join nodes (code done 2026-09-03, commit 64f93ace70; VM verification pending)
+### Phase 4: join nodes (done 2026-09-03, commit 64f93ace70; VM: guard 30/30 phase 4 on cassert, check-world clean)
 
 As built: set_join_predetoast_attrs() in set_join_references() records per side
 Join.predetoast_{outer,inner}_{safe,all}; attributes used in merge or hash clauses
