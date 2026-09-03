@@ -18,12 +18,9 @@
  */
 #include "postgres.h"
 
-#include "catalog/pg_type.h"
 #include "executor/executor.h"
 #include "executor/execScan.h"
 #include "miscadmin.h"
-#include "nodes/nodeFuncs.h"
-#include "utils/fmgroids.h"
 
 /* ----------------------------------------------------------------
  *		ExecScan
@@ -163,96 +160,35 @@ ExecScanReScan(ScanState *node)
 bool		shared_detoast = true;
 
 /*
- * Attributes of this scan node's slot that several of its expressions would
- * detoast, as recorded by the planner in set_plan_refs().
- */
-static Bitmapset *
-ExecScanPredetoastCandidates(ScanState *node, TupleDesc tupdesc)
-{
-	return ((Scan *) node->ps.plan)->predetoast_attrs;
-}
-
-/*
- * Functions whose result depends on the stored representation of their
- * argument rather than on its value.  A Var passed directly to one of these
- * must keep its toast pointer, so the attribute is never detoasted in place.
- */
-static bool
-predetoast_veto_walker(Node *node, Bitmapset **vetoed)
-{
-	if (node == NULL)
-		return false;
-	if (IsA(node, FuncExpr))
-	{
-		FuncExpr   *f = (FuncExpr *) node;
-
-		if (f->funcid == F_PG_COLUMN_SIZE ||
-			f->funcid == F_PG_COLUMN_COMPRESSION ||
-			f->funcid == F_PG_COLUMN_TOAST_CHUNK_ID)
-		{
-			ListCell   *lc;
-
-			foreach(lc, f->args)
-			{
-				Var		   *arg = (Var *) lfirst(lc);
-
-				if (IsA(arg, Var) && arg->varattno > 0)
-					*vetoed = bms_add_member(*vetoed, arg->varattno);
-			}
-		}
-	}
-	return expression_tree_walker(node, predetoast_veto_walker, vetoed);
-}
-
-/*
  * ExecScanPredetoastAttrs
  *
- * Decide which scan-slot attributes this node may detoast in place.  A
- * detoasted value written back into the scan slot is visible to every
- * expression of the node, which is the point, but also to any parent that
- * reads the slot or a projection of it.  That is harmless as long as the
- * value is never copied into a stored tuple, so an attribute qualifies when
- * either the parent chain consumes rows one at a time (EXEC_FLAG_ROW_CONSUMER)
- * or the node projects and the attribute leaves it only inside expression
- * results, never as a bare Var.  A node without projection hands its scan slot
- * to the parent, so all attributes count as projected there.  Attributes
- * inspected by a representation-dependent function are excluded outright.
+ * Which scan-slot attributes this node may detoast in place.  The planner
+ * recorded the candidates (see set_scan_predetoast_attrs); what remains here
+ * is the part only the executor knows.  A detoasted value written back into
+ * the scan slot is visible to any parent that reads the slot or a projection
+ * of it, which is harmless as long as it never gets copied into a stored
+ * tuple.  With EXEC_FLAG_ROW_CONSUMER the parent chain guarantees that, so
+ * every candidate qualifies; otherwise only attributes that leave the node
+ * inside expression results do, and a node without projection, which hands
+ * its whole scan slot to the parent, gets none.
  */
 Bitmapset *
 ExecScanPredetoastAttrs(ScanState *node, TupleDesc tupdesc, int eflags)
 {
 	Plan	   *plan = node->ps.plan;
-	Bitmapset  *candidates;
-	Bitmapset  *allowed = NULL;
-	Bitmapset  *vetoed = NULL;
-	ListCell   *lc;
+	Scan	   *scan = (Scan *) plan;
 	int			varno;
 
 	/* Agg, Sort and others embed a ScanState too; only real scans qualify */
 	if (!shared_detoast || tupdesc == NULL || !IsScanPlan(plan))
 		return NULL;
-
-	candidates = ExecScanPredetoastCandidates(node, tupdesc);
-	if (candidates == NULL)
+	if (scan->predetoast_attrs_all == NULL)
 		return NULL;
 
-	for (int i = 0; i < tupdesc->natts; i++)
-	{
-		Form_pg_attribute att = TupleDescAttr(tupdesc, i);
-
-		if (att->attisdropped || att->attlen != -1 ||
-			att->attstorage == TYPSTORAGE_PLAIN)
-			continue;
-		if (bms_is_member(att->attnum, candidates))
-			allowed = bms_add_member(allowed, att->attnum);
-	}
-
-	predetoast_veto_walker((Node *) plan->targetlist, &vetoed);
-	predetoast_veto_walker((Node *) plan->qual, &vetoed);
-	allowed = bms_del_members(allowed, vetoed);
-
 	if (eflags & EXEC_FLAG_ROW_CONSUMER)
-		return allowed;
+		return scan->predetoast_attrs_all;
+	if (scan->predetoast_attrs_safe == NULL)
+		return NULL;
 
 	/*
 	 * The targetlist of an index-only scan, and of a foreign or custom scan
@@ -260,21 +196,13 @@ ExecScanPredetoastAttrs(ScanState *node, TupleDesc tupdesc, int eflags)
 	 * scan tuple through INDEX_VAR; everything else uses the scan's own
 	 * varno.
 	 */
-	if (IsA(plan, IndexOnlyScan) || ((Scan *) plan)->scanrelid == 0)
+	if (IsA(plan, IndexOnlyScan) || scan->scanrelid == 0)
 		varno = INDEX_VAR;
 	else
-		varno = ((Scan *) plan)->scanrelid;
+		varno = scan->scanrelid;
 
 	if (tlist_matches_tupdesc(&node->ps, plan->targetlist, varno, tupdesc))
 		return NULL;			/* no projection: the whole slot is passed up */
 
-	foreach(lc, plan->targetlist)
-	{
-		TargetEntry *tle = (TargetEntry *) lfirst(lc);
-
-		if (IsA(tle->expr, Var) && ((Var *) tle->expr)->varattno > 0)
-			allowed = bms_del_member(allowed, ((Var *) tle->expr)->varattno);
-	}
-
-	return allowed;
+	return scan->predetoast_attrs_safe;
 }

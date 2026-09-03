@@ -733,7 +733,18 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 
 		EEO_CASE(EEOP_SCAN_VAR_TOAST)
 		{
-			ExecEvalVarToast(state, op, econtext, scanslot);
+			int			attnum = op->d.var.attnum;
+
+			/* only out-of-line or compressed values are worth the call */
+			Assert(attnum >= 0 && attnum < scanslot->tts_nvalid);
+			if (!scanslot->tts_isnull[attnum] &&
+				VARATT_IS_EXTENDED(DatumGetPointer(scanslot->tts_values[attnum])))
+				ExecEvalVarToast(state, op, econtext, scanslot);
+			else
+			{
+				*op->resvalue = scanslot->tts_values[attnum];
+				*op->resnull = scanslot->tts_isnull[attnum];
+			}
 
 			EEO_NEXT();
 		}

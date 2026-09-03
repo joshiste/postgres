@@ -544,11 +544,15 @@ typedef struct Scan
 	Index		scanrelid;
 
 	/*
-	 * scan-slot attributes that several of this node's expressions detoast;
-	 * the executor may detoast these once per row in place (see
-	 * ExecScanPredetoastAttrs)
+	 * Toastable scan-slot attributes that several of this node's expressions
+	 * detoast, which the executor may therefore detoast once per row in place
+	 * (see ExecScanPredetoastAttrs).  predetoast_attrs_safe holds those that
+	 * leave the node only inside expression results; predetoast_attrs_all
+	 * adds those the node also passes up unchanged, which is only safe when
+	 * the parent chain never stores a tuple.
 	 */
-	Bitmapset  *predetoast_attrs;
+	Bitmapset  *predetoast_attrs_safe;
+	Bitmapset  *predetoast_attrs_all;
 } Scan;
 
 /*
