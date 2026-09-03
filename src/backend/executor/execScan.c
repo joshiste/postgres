@@ -227,6 +227,7 @@ ExecScanPredetoastAttrs(ScanState *node, TupleDesc tupdesc, int eflags)
 	Bitmapset  *allowed = NULL;
 	Bitmapset  *vetoed = NULL;
 	ListCell   *lc;
+	int			varno;
 
 	/* Agg, Sort and others embed a ScanState too; only real scans qualify */
 	if (!shared_detoast || tupdesc == NULL || !IsScanPlan(plan))
@@ -254,8 +255,18 @@ ExecScanPredetoastAttrs(ScanState *node, TupleDesc tupdesc, int eflags)
 	if (eflags & EXEC_FLAG_ROW_CONSUMER)
 		return allowed;
 
-	if (tlist_matches_tupdesc(&node->ps, plan->targetlist,
-							  ((Scan *) plan)->scanrelid, tupdesc))
+	/*
+	 * The targetlist of an index-only scan, and of a foreign or custom scan
+	 * that replaces a join or upper relation (scanrelid == 0), refers to the
+	 * scan tuple through INDEX_VAR; everything else uses the scan's own
+	 * varno.
+	 */
+	if (IsA(plan, IndexOnlyScan) || ((Scan *) plan)->scanrelid == 0)
+		varno = INDEX_VAR;
+	else
+		varno = ((Scan *) plan)->scanrelid;
+
+	if (tlist_matches_tupdesc(&node->ps, plan->targetlist, varno, tupdesc))
 		return NULL;			/* no projection: the whole slot is passed up */
 
 	foreach(lc, plan->targetlist)
