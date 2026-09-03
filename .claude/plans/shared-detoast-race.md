@@ -71,7 +71,7 @@ outweighs the walk); the comparison there is between A and B, not against base.
 | measure                                              | A | B |
 |------------------------------------------------------|---|---|
 | cases at target (of those with min_phase 1)          | all | all |
-| candidates denied by the permission rule (count via EXPLAIN VERBOSE line, all cases) | 2 of 30 (cases 15, 17) | 2 of 30 (same) |
+| candidates denied by the permission rule (count via EXPLAIN VERBOSE line, all cases) | 2 of 30 (cases 15, 17); 1 of 30 after Phase 6 | 2 of 30 (same) |
 
 Recorded for the Phase 5 decision on cross-node precision; not a tiebreaker unless
 the two differ.
