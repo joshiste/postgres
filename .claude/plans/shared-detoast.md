@@ -258,8 +258,12 @@ pull_multi_detoast_vars() (clauses.c) does the counting and the veto; get_attsto
   PlanState.ps_predetoast_scanattrs.
 - Found while writing the module: length(text) detoasts fully in multibyte encodings,
   so it left the no-detoast function list; octet_length stays.
-- UPDATE toast identity test and a wal_consistency_checking run of the regression
-  suite.
+- UPDATE toast identity: covered by guard case 24 and the module test.
+- JIT verified 2026-09-03 on the VM with an LLVM 14 cassert build: `make check` with
+  jit forced (jit_above_cost=0 etc.) all 243 passed; the module test under forced JIT
+  passes with identical detoast counts.
+- wal_consistency_checking=all regression run: pending clean rerun (first run only
+  showed the two EXPLAIN expected-output diffs since fixed).
 
 Benefit: the two failure modes reviewers feared, fat tuples in materializing nodes
 and semantic change for raw readers, are covered by deterministic tests, and the
