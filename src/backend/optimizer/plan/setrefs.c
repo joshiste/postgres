@@ -668,7 +668,8 @@ set_scan_predetoast_attrs(PlannerInfo *root, Scan *scan)
 	 */
 	if (scan->scanrelid > 0 && !IsA(plan, IndexOnlyScan))
 	{
-		RangeTblEntry *rte = planner_rt_fetch(scan->scanrelid, root);
+		/* scanrelid was already offset into the flattened range table */
+		RangeTblEntry *rte = rt_fetch(scan->scanrelid, root->glob->finalrtable);
 
 		if (rte->rtekind == RTE_RELATION)
 			relid = rte->relid;

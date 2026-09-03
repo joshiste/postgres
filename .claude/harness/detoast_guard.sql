@@ -172,7 +172,10 @@ WITH cases(n, label, settings, q, m_toast, m_shared, m_rows, p_toast, p_shared, 
                                                                    AND pg_column_compression(docz) IS NOT NULL AND pg_column_toast_chunk_id(docz) IS NOT NULL$$, :docz_colsize),
                                                                                                                                                      20, NULL, 1,  NULL, NULL, 1),
  (28, 'GroupAgg via Sort above scan, 2 WHERE ops',    'enable_hashagg=off', $$SELECT count(*) FROM dt_probe WHERE doc ? 'a' AND doc @> '{"b":2}' GROUP BY id$$,
-                                                                                                                                                    266, NULL, 1,   133, NULL, 1)
+                                                                                                                                                    266, NULL, 1,   133, NULL, 1),
+ (29, 'correlated subplan scan (rtoffset > 0), 2 ops', NULL,      $$SELECT (SELECT q.doc->'a' || q.doc->'b' FROM dt_probe2 q WHERE q.id = p.id) FROM dt_probe p$$,
+                                                                                                                                                    266, NULL, 1,   133, NULL, 1),
+ (30, 'FOR UPDATE through LockRows, 2 ops',            NULL,      $$SELECT doc->'a', doc->'b' FROM dt_probe FOR UPDATE$$,                           266, NULL, 1,   133, NULL, 1)
 )
 SELECT c.n, c.label, r.toast_blks, r.shared_blks, r.rows, r.ms,
        CASE WHEN :'mode' = 'patched' AND c.min_phase <= :phase THEN c.p_toast  ELSE c.m_toast  END::bigint AS exp_toast,
