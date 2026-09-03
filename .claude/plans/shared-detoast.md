@@ -333,19 +333,23 @@ table is involved.
 - No-cassert check-world (VM perf build, lz4, injection points): clean, 2026-09-03.
   Phase 5 closed.
 
-### Phase 6 (optional): widen coverage
+### Phase 6: widen coverage (done 2026-09-03)
 
-- Cross-node permission analysis if Phase 5 shows it pays.
-- Aggregate arguments in Agg nodes (transition functions detoast per row; the group
-  state is not the input slot).
-- Generalize the physical-slot test from Phase 4: any storing parent whose child
-  returns a fixed physical-tuple slot copies the physical tuple, so the deny is only
-  needed when a projection into a virtual slot carrying the bare Var sits between the
-  pre-detoasting node and the storing node. Replacing the eflags rule with this check
-  would recover Sort/Hash/Agg directly above a projection-free scan.
-
-Benefit: closes the remaining gaps; each item is independently measurable with the
-harness.
+- Parent-aware no-projection set (Scan.predetoast_attrs_noproj, set at the parent in
+  set_plan_refs after recursing): tuple-copying parents allow everything, hashed Agg
+  everything but grouping columns, projecting parents everything not bare-projected,
+  unknown parents nothing. Guard case 17 (HashAgg directly above the scan) reaches one
+  detoast; so does Sort above a projection-free scan.
+- Aggregate inputs (Agg.predetoast_outer_attrs): aggregate arguments and quals
+  referencing the same input column share one detoast, excluding grouping columns and
+  columns passed whole to an aggregate (count(doc), array_agg(doc)). EXPLAIN shows
+  "Pre-detoast Outer" on the Aggregate node.
+- Still excluded by design: MergeJoin inner side, join keys, grouping sets and mixed
+  aggregation, IndexOnlyScan/ValuesScan/SubqueryScan/CustomScan without projection,
+  pass-through chains (Limit, LockRows, Append) below a storing parent unless the
+  top-level permission reaches them.
+- Denied candidates in the guard suite are now 1 of 30 (case 15, bare doc projected
+  under a Sort, which is correct).
 
 ## Risks and how the plan handles them
 
