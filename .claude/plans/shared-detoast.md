@@ -333,7 +333,7 @@ table is involved.
 - No-cassert check-world (VM perf build, lz4, injection points): clean, 2026-09-03.
   Phase 5 closed.
 
-### Phase 6: widen coverage (done 2026-09-03)
+### Phase 6: widen coverage (done 2026-09-03; VM: guard 30/30, cassert check-world clean)
 
 - Parent-aware no-projection set (Scan.predetoast_attrs_noproj, set at the parent in
   set_plan_refs after recursing): tuple-copying parents allow everything, hashed Agg

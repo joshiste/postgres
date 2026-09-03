@@ -79,3 +79,26 @@ No join in these statements, so the +11/+88 over B2 is layout movement from the 
 interpreter cases and PlanState fields, the same magnitude seen between master and
 base. Guard 30/30 at phase 4 on the cassert build, identity kept; check-world clean;
 wal_consistency_checking regression clean; forced-JIT regression and module clean.
+
+## Phase 6 (58c2aec422), eddie-debian, 2026-09-03
+
+| workload   | master | base   | Phase 4 | Phase 6 | Phase 6 vs base |
+|------------|-------:|-------:|--------:|--------:|----------------:|
+| loop_noop  | 24,128 | 24,156 |  24,185 |  24,178 |             +22 |
+| loop_jsonb | 32,374 | 32,375 |  32,474 |  32,468 |             +93 |
+| loop_wide  | 5,100,165 | 5,074,017 | 5,047,800 | 5,161,606 |    +87,589 |
+
+Guard 30/30 at phase 6 on the cassert build (case 17 now one detoast), identity kept,
+check-world clean.
+
+The loop_wide jump was investigated: with plan_cache_mode=force_generic_plan the per
+symbol profile contains no planner functions, so nothing is replanned; a build of the
+same tree with the two Phase 6 planner calls disabled (which are no-ops for this
+statement) measured 5,119,047 against 5,177,726 for the unmodified build under generic
+plans. Two binaries differing only in plan-time code thus differ by 1% at execution
+time, which can only come from binary layout, most plausibly through pointer-keyed
+hash tables (ResourceOwner's hash moved in the profile). loop_wide is therefore
+trustworthy only to about 1.5% between builds; the two small statements, where the
+whole change costs 22 and 93 instructions, are the reliable no-regression evidence.
+Planning cost itself, visible under force_custom_plan, is +1.7% for this 50-scan,
+1000-expression statement and is paid once per plan.
