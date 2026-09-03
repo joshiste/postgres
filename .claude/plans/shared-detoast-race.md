@@ -30,6 +30,20 @@ shared-detoast-baseline.md: loop_noop 24,128; loop_jsonb 32,374; loop_wide 5,100
 | loop_jsonb |            32,374 |          32,375 |         +1 |       34,315 |  +1,940 |       33,372 |    +997 |
 | loop_wide  |         5,100,165 |       5,074,017 |    -26,148 |    5,845,694 | +771,677 |   5,480,362 | +406,345 |
 
+B2 (f5d9a2d27e: plan-time sets, folded veto, pointer pick in the executor, inline
+header check in the interpreter), same host, 2026-09-03:
+
+| workload   | B2 instr/iter | B2 delta vs base |
+|------------|--------------:|-----------------:|
+| loop_noop  |        24,174 |              +18 |
+| loop_jsonb |        32,386 |              +11 |
+| loop_wide  |     5,033,261 |          -40,756 |
+
+B2 gate: guard 30/30 patched on cassert (two new subplan/FOR UPDATE cases), base
+30/30 master with the new suite, identity kept, check-world pass. B2's first
+check-world failed in eval-plan-qual: the RTE lookup used the subquery level's
+range table after scanrelid had been offset into the flattened one; fixed.
+
 Race run 2026-09-03 on eddie-debian; base here is 77b181154d (with the unused walker
 and the IsScanPlan check), A is 18c0f84c1a, B is feac300bfd. Guard suites on the
 cassert builds: base 28/28 master; A and B 28/28 patched phase 1, identity kept.
@@ -85,6 +99,20 @@ comparison above is the decider-specific part only.
 
 ## Verdict
 
-Decided on: ____  Winner: ____  Reason (one paragraph):
+Decided on: 2026-09-03  Winner: B2 (plan-time decision, executor permission check)
 
-Loser branch deleted on: ____
+Reason: A and B both met every correctness gate and every Phase 1 target, so the
+decision fell to criterion 1. B beat A eightfold on the no-help statement (+26 vs
++215 instructions), but both regressed 3% to 15% on statements that reference an
+inline, never-toasted jsonb column twice, because the base still did the veto walk,
+toastability check, bare-Var scan and bitmap allocations at every ExecutorStart once
+candidates existed. Moving all of that to plan time (B2) removed the regression:
++18 and +11 instructions on the two small statements, within layout noise, and no
+measurable cost on the amplified one. An executor-only variant cannot get there,
+since the same work would have to run at every start. The price is one new Plan
+field pair on Scan (two Bitmapsets), which the reviewers of the 2024 patch
+questioned; the numbers above are the answer to that question.
+
+Loser branch deleted on: 2026-09-03 (detoast-exec and the intermediate detoast-plan;
+detoast-plan2 continues as the working branch, detoast-base stays as the record of
+the shared mechanism).

@@ -131,7 +131,7 @@ candidates the eflags rule denies so its value can be judged with numbers.
 
 - Branch `detoast-base` off master. Build with --enable-cassert and a second build
   without, both --enable-injection-points, --enable-debug.
-- Done 2026-09-02 as `.claude/harness/detoast_guard.sql` (27 cases, master values pinned,
+- Done 2026-09-02 as `.claude/harness/detoast_guard.sql` (30 cases, master values pinned,
   patched targets per case, exit status non-zero on mismatch). Cases:
   single reference; two references in WHERE with a failing first predicate; bare Var
   projected under Sort/Hash/Agg/Material/Memoize; UPDATE ... WHERE big ? 'x' (check the
@@ -186,7 +186,7 @@ Benefit: the mechanism is proven correct and cost-free on its own, so the race i
 next phase measures only the deciders, and either decider can be dropped without
 touching the executor code.
 
-### Phase 2: the race
+### Phase 2: the race (done 2026-09-03, winner B2; see shared-detoast-race.md)
 
 Branches `detoast-exec` (decider A) and `detoast-plan` (decider B), each stacked on
 `detoast-base` and touching only the decider. Both must pass the same guard tests
@@ -214,7 +214,14 @@ Benefit: the one question that previous attempts left to argument, whether the
 decision costs anything on queries it does not help, is answered with measurements,
 and the base is untouched whichever way it goes.
 
-### Phase 3: correctness hardening and tests (on the winner)
+### Phase 3: correctness hardening and tests (on B2, branch detoast-plan2)
+
+Design as it stands after the race: set_scan_predetoast_attrs() in setrefs.c records
+Scan.predetoast_attrs_safe (toastable, multi-referenced, not vetoed, not projected as
+a bare Var) and Scan.predetoast_attrs_all (also the bare-projected ones); the executor
+picks all with EXEC_FLAG_ROW_CONSUMER, safe when the node projects, none otherwise.
+pull_multi_detoast_vars() (clauses.c) does the counting and the veto; get_attstorage()
+(lsyscache.c, new) supplies column storage for toastability.
 
 - Audit every writer/reader of tts_values for heap, buffer-heap and minimal slots
   (materialize, copyslot, getsomeattrs, EPQ slots, trigger old/new slots, RETURNING)
