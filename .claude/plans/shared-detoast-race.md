@@ -20,9 +20,21 @@ shared-detoast-baseline.md: loop_noop 24,128; loop_jsonb 32,374; loop_wide 5,100
 
 | workload   | master instr/iter | base instr/iter | base delta | A instr/iter | A delta | B instr/iter | B delta |
 |------------|------------------:|----------------:|-----------:|-------------:|--------:|-------------:|--------:|
-| loop_noop  |            24,128 |          24,155 |        +27 |              |         |              |         |
-| loop_jsonb |            32,374 |          32,366 |         -8 |              |         |              |         |
-| loop_wide  |         5,100,165 |       5,089,749 |    -10,416 |              |         |              |         |
+| loop_noop  |            24,128 |          24,156 |        +28 |       24,371 |    +215 |       24,182 |     +26 |
+| loop_jsonb |            32,374 |          32,375 |         +1 |       34,315 |  +1,940 |       33,372 |    +997 |
+| loop_wide  |         5,100,165 |       5,074,017 |    -26,148 |    5,845,694 | +771,677 |   5,480,362 | +406,345 |
+
+Race run 2026-09-03 on eddie-debian; base here is 77b181154d (with the unused walker
+and the IsScanPlan check), A is 18c0f84c1a, B is feac300bfd. Guard suites on the
+cassert builds: base 28/28 master; A and B 28/28 patched phase 1, identity kept.
+
+Reading: B wins criterion 1 outright (26 vs 215 on the no-help case). But both
+regress on loop_jsonb and loop_wide, where the jsonb column is referenced twice but
+is inline, so nothing is gained. That regression is not the decider walk: it is the
+base's per-ExecutorStart work once candidates exist (veto walk over the expressions,
+toastability loop, bare-Var scan, bitmap allocations), plus the out-of-line
+EEOP_SCAN_VAR_TOAST call per reference per row. Constraint 1 (no regression when the
+column is not toasted) is therefore not yet met by either variant.
 
 Base measured 2026-09-02 on eddie-debian (perf build, --enable-depend). The base adds
 the per-store reset branch, the ExecInitNode flag translation and the (empty) decision
@@ -38,7 +50,7 @@ outweighs the walk); the comparison there is between A and B, not against base.
 
 | measure                                              | A | B |
 |------------------------------------------------------|---|---|
-| cases at target (of those with min_phase 1)          |   |   |
+| cases at target (of those with min_phase 1)          | all | all |
 | candidates denied by the permission rule (count via EXPLAIN VERBOSE line, all cases) |   |   |
 
 Recorded for the Phase 5 decision on cross-node precision; not a tiebreaker unless
@@ -60,7 +72,7 @@ comparison above is the decider-specific part only.
 
 | check                                                          | A | B |
 |----------------------------------------------------------------|---|---|
-| prepared statement, generic plan, 100 executions: counts stable |   |   |
+| prepared statement, generic plan, 100 executions: counts stable | yes (perfbench) | yes (perfbench) |
 | plan copied via copyObject keeps the decision                   |   |   |
 | EXPLAIN (no ANALYZE) shows the Pre-detoast line                 |   |   |
 | EXEC_FLAG_EXPLAIN_ONLY path does no detoasting                  |   |   |
