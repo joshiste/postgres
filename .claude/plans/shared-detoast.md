@@ -94,6 +94,28 @@ candidates the eflags rule denies so its value can be judged with numbers.
 - INJECTION_POINT compiles to `((void) name)` without --enable-injection-points, so
   a point in detoast_attr costs nothing in production builds.
 
+## Review (2026-09-04)
+
+The /code-review skill was attempted twice (high, then medium effort) and both runs
+died on the session rate limit, so the diff was reviewed by hand instead. Findings,
+all fixed in one commit with tests:
+
+- Top-level ROW_CONSUMER grant applied to every receiver, including SPI, SQL functions
+  and tuplestores, which copy the projected tuple: a RETURN QUERY would have stored
+  full documents. Grant now depends on the DestReceiver kind.
+- Raw-reader veto (pg_column_size etc.) only covered the deciding node; an ancestor
+  reading a bare-projected column raw saw the detoasted form. New top-down pass
+  apply_raw_reader_vetoes() maps ancestor raw reads through targetlists to scans. A
+  first version of the pass keyed the veto by output position instead of scan
+  attribute number and did nothing; the original test could not tell (size and
+  compression of an uncompressed external value look the same either way), the
+  toast chunk id can.
+- Scan below an Agg could detoast a column the aggregate keeps (count(DISTINCT doc));
+  agg_kept_input_attrs() shared between the Agg's and the child scan's decisions.
+- NestLoop parameters excluded from the outer sets (Memoize cache keys).
+- /simplify was not run as a skill (same budget reason); simplifications applied by
+  hand: shared helpers for aggregate-kept and nestloop-parameter attributes.
+
 ## Rebase log
 
 - 2026-09-03: rebased from e073b64d33 onto upstream master 534db08f97 (7 commits);
