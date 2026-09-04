@@ -102,3 +102,15 @@ trustworthy only to about 1.5% between builds; the two small statements, where t
 whole change costs 22 and 93 instructions, are the reliable no-regression evidence.
 Planning cost itself, visible under force_custom_plan, is +1.7% for this 50-scan,
 1000-expression statement and is paid once per plan.
+
+## After the review fixes (commit series 2026-09-04, on upstream 534db08f97)
+
+| workload   | master | final  | delta vs master |
+|------------|-------:|-------:|----------------:|
+| loop_noop  | 24,128 | 24,200 |      +72 (0.3%) |
+| loop_jsonb | 32,374 | 32,527 |     +153 (0.5%) |
+
+The receiver check in InitPlan and the (empty) raw-reader pass account for part of
+the step from the Phase 6 build; the rest is layout, as before. Guard 30/30 at phase
+6, identity kept, cassert check-world clean on the VM. These are the final numbers
+for the series as pushed.
