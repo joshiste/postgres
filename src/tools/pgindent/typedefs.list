@@ -2129,6 +2129,7 @@ PTIterationArray
 PTOKEN_PRIVILEGES
 PTOKEN_USER
 pull_multi_detoast_context
+pull_raw_reader_context
 PUTENVPROC
 PVIndStats
 PVIndVacStatus

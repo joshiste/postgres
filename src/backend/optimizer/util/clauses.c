@@ -7003,6 +7003,50 @@ pull_multi_detoast_walker(Node *node, pull_multi_detoast_context *context)
 }
 
 /*
+ * pull_raw_reader_attrs
+ *		Attribute numbers of Vars with the given varno that expressions in the
+ *		list pass directly to a function reading the stored representation.
+ */
+typedef struct
+{
+	Index		varno;
+	Bitmapset  *attrs;
+} pull_raw_reader_context;
+
+static bool
+pull_raw_reader_walker(Node *node, pull_raw_reader_context *context)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, FuncExpr) &&
+		func_reads_raw_representation(((FuncExpr *) node)->funcid))
+	{
+		ListCell   *lc;
+
+		foreach(lc, ((FuncExpr *) node)->args)
+		{
+			Var		   *var = strip_relabel_var((Node *) lfirst(lc),
+												context->varno);
+
+			if (var)
+				context->attrs = bms_add_member(context->attrs, var->varattno);
+		}
+	}
+	return expression_tree_walker(node, pull_raw_reader_walker, context);
+}
+
+Bitmapset *
+pull_raw_reader_attrs(List *exprs, Index varno)
+{
+	pull_raw_reader_context context;
+
+	context.varno = varno;
+	context.attrs = NULL;
+	pull_raw_reader_walker((Node *) exprs, &context);
+	return context.attrs;
+}
+
+/*
  * pull_multi_detoast_vars
  *		Find scan-slot Vars that at least two expressions in a plan node's
  *		targetlist and qual would detoast.

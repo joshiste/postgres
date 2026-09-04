@@ -77,6 +77,7 @@ ExecutorCheckPerms_hook_type ExecutorCheckPerms_hook = NULL;
 
 /* decls for local routines only used within this module */
 static void InitPlan(QueryDesc *queryDesc, int eflags);
+static bool dest_consumes_rows(DestReceiver *dest);
 static void CheckValidRowMarkRel(Relation rel, RowMarkType markType);
 static void ExecPostprocessPlan(EState *estate);
 static void ExecEndPlan(PlanState *planstate, EState *estate);
@@ -836,6 +837,29 @@ ExecCheckXactReadOnly(PlannedStmt *plannedstmt)
 }
 
 
+/*
+ * Does this receiver pass each row on without keeping the projected tuple?
+ */
+static bool
+dest_consumes_rows(DestReceiver *dest)
+{
+	switch (dest->mydest)
+	{
+		case DestNone:
+		case DestDebug:
+		case DestRemote:
+		case DestRemoteExecute:
+		case DestRemoteSimple:
+		case DestCopyOut:
+		case DestIntoRel:
+		case DestTransientRel:
+		case DestExplainSerialize:
+			return true;
+		default:
+			return false;
+	}
+}
+
 /* ----------------------------------------------------------------
  *		InitPlan
  *
@@ -999,7 +1023,14 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 	 * tree.  This opens files, allocates storage and leaves us ready to start
 	 * processing tuples.
 	 */
-	if (!IsParallelWorker())
+
+	/*
+	 * Let the plan detoast projected toastable columns in place if the rows
+	 * go to a receiver that consumes them one at a time.  Receivers that keep
+	 * the projected tuples (SPI, SQL functions, tuplestores) would then hold
+	 * the full values instead of toast pointers.
+	 */
+	if (!IsParallelWorker() && dest_consumes_rows(queryDesc->dest))
 		eflags |= EXEC_FLAG_GRANT_ROW_CONSUMER;
 	planstate = ExecInitNode(plan, estate, eflags);
 

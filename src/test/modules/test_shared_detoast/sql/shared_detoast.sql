@@ -109,6 +109,18 @@ EXPLAIN (VERBOSE, COSTS OFF) SELECT sum((doc->>'a')::int), sum((doc->>'b')::int)
 SELECT sum((doc->>'a')::int), sum((doc->>'b')::int) FROM sd;
 -- unless the column itself is an aggregate argument, whose state may keep it
 SELECT sum((doc->>'a')::int), sum((doc->>'b')::int), count(doc) FROM sd;
+-- a representation reader in an ancestor still sees the stored form: the
+-- scan below keeps the toast pointer and detoasts per reference
+SELECT pg_column_toast_chunk_id(d) IS NOT NULL AS pointer_kept, a, b
+FROM (SELECT doc AS d, doc->'a' AS a, doc->'b' AS b FROM sd OFFSET 0) s;
+-- a receiver that keeps the rows (here SPI, via a set-returning function) gets
+-- toast pointers, not full values, so the scan detoasts per reference
+CREATE FUNCTION sd_rows() RETURNS TABLE (d jsonb, a jsonb, b jsonb) LANGUAGE plpgsql AS $$
+BEGIN RETURN QUERY SELECT doc, doc->'a', doc->'b' FROM sd; END $$;
+SELECT pg_column_toast_chunk_id(d) IS NOT NULL AS pointer_kept, a, b FROM sd_rows();
+DROP FUNCTION sd_rows();
+-- an aggregate that keeps its argument leaves the scan below it alone too
+SELECT count(DISTINCT doc) FROM sd WHERE doc ? 'a' AND doc @> '{"b": 2}';
 -- an inline column never detoasts
 SELECT small->'a', small->'b' FROM sd;
 -- switching the feature off restores one detoast per reference
