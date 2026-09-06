@@ -26,8 +26,10 @@
 #include "optimizer/subselect.h"
 #include "optimizer/tlist.h"
 #include "parser/parse_relation.h"
+#include "parser/parsetree.h"
 #include "rewrite/rewriteManip.h"
 #include "tcop/utility.h"
+#include "utils/lsyscache.h"
 #include "utils/syscache.h"
 
 
@@ -134,6 +136,8 @@ static bool flatten_rtes_walker(Node *node, flatten_rtes_walker_context *cxt);
 static void add_rte_to_flat_rtable(PlannerGlobal *glob, List *rteperminfos,
 								   RangeTblEntry *rte);
 static Plan *set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset);
+static void set_scan_predetoast_attrs(PlannerInfo *root, Scan *scan);
+static void apply_raw_reader_vetoes(Plan *plan, Bitmapset *raw_above);
 static Plan *set_indexonlyscan_references(PlannerInfo *root,
 										  IndexOnlyScan *plan,
 										  int rtoffset);
@@ -353,6 +357,12 @@ set_plan_references(PlannerInfo *root, Plan *plan)
 
 	/* Now fix the Plan tree */
 	result = set_plan_refs(root, plan, rtoffset);
+
+	/*
+	 * Now that every node knows what it may detoast in place, take back what
+	 * an ancestor still needs in stored form.
+	 */
+	apply_raw_reader_vetoes(result, NULL);
 
 	/*
 	 * If we have AlternativeSubPlans, it is likely that we now have some
@@ -628,6 +638,178 @@ add_rte_to_flat_rtable(PlannerGlobal *glob, List *rteperminfos,
 		newperminfo = addRTEPermissionInfo(&glob->finalrteperminfos, newrte);
 		memcpy(newperminfo, perminfo, sizeof(RTEPermissionInfo));
 	}
+}
+
+/*
+ * set_scan_predetoast_attrs
+ *		Record which scan-slot attributes the executor may detoast once per
+ *		row in place, now that the node's expressions are final.
+ *
+ * Candidates are toastable attributes that two or more expressions detoast.
+ * Those the node passes up as bare Vars can only be handled when the parent
+ * chain never stores a tuple, so they go into predetoast_attrs_all only.
+ */
+static void
+set_scan_predetoast_attrs(PlannerInfo *root, Scan *scan)
+{
+	Plan	   *plan = &scan->plan;
+	List	   *vars;
+	Oid			relid = InvalidOid;
+	Bitmapset  *bare = NULL;
+	Bitmapset  *all = NULL;
+	Bitmapset  *safe = NULL;
+	ListCell   *lc;
+
+	scan->predetoast_attrs_safe = NULL;
+	scan->predetoast_attrs_all = NULL;
+
+	vars = pull_multi_detoast_vars(plan->targetlist, plan->qual, 0);
+	if (vars == NIL)
+		return;
+
+	/*
+	 * Column-level storage settings override the type's default, so consult
+	 * pg_attribute when the scan tuple is a table row.  Index-only scans and
+	 * scans standing in for a join produce tuples of their own shape; fall
+	 * back to the type there.
+	 */
+	if (scan->scanrelid > 0 && !IsA(plan, IndexOnlyScan))
+	{
+		/* scanrelid was already offset into the flattened range table */
+		RangeTblEntry *rte = rt_fetch(scan->scanrelid, root->glob->finalrtable);
+
+		if (rte->rtekind == RTE_RELATION)
+			relid = rte->relid;
+	}
+
+	foreach(lc, vars)
+	{
+		Var		   *var = (Var *) lfirst(lc);
+		char		storage;
+
+		if (get_typlen(var->vartype) != -1)
+			continue;
+		if (OidIsValid(relid) && var->varno != INDEX_VAR)
+			storage = get_attstorage(relid, var->varattno);
+		else
+			storage = get_typstorage(var->vartype);
+		if (storage == TYPSTORAGE_PLAIN)
+			continue;
+		all = bms_add_member(all, var->varattno);
+	}
+	list_free(vars);
+	if (all == NULL)
+		return;
+
+	foreach(lc, plan->targetlist)
+	{
+		TargetEntry *tle = (TargetEntry *) lfirst(lc);
+
+		if (IsA(tle->expr, Var) && ((Var *) tle->expr)->varattno > 0)
+			bare = bms_add_member(bare, ((Var *) tle->expr)->varattno);
+	}
+
+	safe = bms_difference(all, bare);
+	bms_free(bare);
+
+	scan->predetoast_attrs_all = all;
+	scan->predetoast_attrs_safe = safe;
+}
+
+/*
+ * apply_raw_reader_vetoes
+ *		Walk the finished plan tree top-down and take out of every scan's
+ *		pre-detoast sets the attributes some ancestor passes to a function
+ *		that reads the stored representation.
+ *
+ * A scan node already excludes such attributes for its own expressions; an
+ * ancestor can only see the scan's value through bare Vars, so raw_above
+ * (output attribute numbers of this node that an ancestor reads raw) is
+ * mapped through this node's targetlist and joined with the node's own raw
+ * reads before it is handed to the children.
+ */
+static void
+apply_raw_reader_vetoes(Plan *plan, Bitmapset *raw_above)
+{
+	List	   *exprs;
+	ListCell   *lc;
+
+	if (plan == NULL)
+		return;
+
+	switch (nodeTag(plan))
+	{
+		case T_Append:
+			foreach(lc, ((Append *) plan)->appendplans)
+				apply_raw_reader_vetoes((Plan *) lfirst(lc), raw_above);
+			return;
+		case T_MergeAppend:
+			foreach(lc, ((MergeAppend *) plan)->mergeplans)
+				apply_raw_reader_vetoes((Plan *) lfirst(lc), raw_above);
+			return;
+		default:
+			break;
+	}
+
+	exprs = list_copy(plan->targetlist);
+	exprs = list_concat(exprs, plan->qual);
+
+	for (int side = 0; side < 2; side++)
+	{
+		Plan	   *child;
+		Index		varno;
+		Bitmapset  *raw;
+
+		if (IsA(plan, SubqueryScan))
+		{
+			if (side == 1)
+				break;
+			child = ((SubqueryScan *) plan)->subplan;
+			varno = ((Scan *) plan)->scanrelid;
+		}
+		else
+		{
+			child = side == 0 ? plan->lefttree : plan->righttree;
+			varno = side == 0 ? OUTER_VAR : INNER_VAR;
+		}
+		if (child == NULL)
+			continue;
+
+		raw = pull_raw_reader_attrs(exprs, varno);
+		foreach(lc, plan->targetlist)
+		{
+			TargetEntry *tle = (TargetEntry *) lfirst(lc);
+			Var		   *var = (Var *) tle->expr;
+
+			if (IsA(var, Var) && var->varno == varno && var->varattno > 0 &&
+				bms_is_member(tle->resno, raw_above))
+				raw = bms_add_member(raw, var->varattno);
+		}
+
+		if (IsScanPlan(child) && raw != NULL)
+		{
+			Scan	   *scan = (Scan *) child;
+			Bitmapset  *attrs = NULL;
+
+			/*
+			 * raw names the child's output columns; the scan's sets are keyed
+			 * by scan-tuple attribute number, reached through its targetlist.
+			 */
+			foreach(lc, child->targetlist)
+			{
+				TargetEntry *tle = (TargetEntry *) lfirst(lc);
+				Var		   *var = (Var *) tle->expr;
+
+				if (IsA(var, Var) && var->varattno > 0 &&
+					bms_is_member(tle->resno, raw))
+					attrs = bms_add_member(attrs, var->varattno);
+			}
+			scan->predetoast_attrs_safe = bms_del_members(scan->predetoast_attrs_safe, attrs);
+			scan->predetoast_attrs_all = bms_del_members(scan->predetoast_attrs_all, attrs);
+		}
+		apply_raw_reader_vetoes(child, raw);
+	}
+	list_free(exprs);
 }
 
 /*
@@ -1347,6 +1529,14 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 	}
 
 	/*
+	 * For scan nodes, record which scan-slot attributes more than one of the
+	 * (now final) expressions would detoast, so the executor can detoast them
+	 * once per row without walking the expressions again at every start.
+	 */
+	if (IsScanPlan(plan))
+		set_scan_predetoast_attrs(root, (Scan *) plan);
+
+	/*
 	 * Now recurse into child plans, if any
 	 *
 	 * NOTE: it is essential that we recurse into child plans AFTER we set
@@ -1484,6 +1674,7 @@ set_subqueryscan_references(PlannerInfo *root,
 		plan->scan.plan.qual =
 			fix_scan_list(root, plan->scan.plan.qual,
 						  rtoffset, NUM_EXEC_QUAL((Plan *) plan));
+		set_scan_predetoast_attrs(root, &plan->scan);
 
 		result = (Plan *) plan;
 	}

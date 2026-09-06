@@ -542,7 +542,51 @@ typedef struct Scan
 	Plan		plan;
 	/* relid is index into the range table */
 	Index		scanrelid;
+
+	/*
+	 * Toastable scan-slot attributes that several of this node's expressions
+	 * detoast, which the executor may therefore detoast once per row in place
+	 * (see ExecScanPredetoastAttrs).  predetoast_attrs_safe holds those that
+	 * leave the node only inside expression results; predetoast_attrs_all
+	 * adds those the node also passes up unchanged, which is only safe when
+	 * the parent chain never stores a tuple.
+	 */
+	Bitmapset  *predetoast_attrs_safe;
+	Bitmapset  *predetoast_attrs_all;
+
 } Scan;
+
+/*
+ * Is this plan node a Scan (or a type derived from Scan)?  Executor states
+ * of several non-scan nodes (Agg, Sort, Material, ...) embed a ScanState, so
+ * code reached through one cannot assume the plan is a Scan without asking.
+ */
+static inline bool
+IsScanPlan(const Plan *plan)
+{
+	switch (nodeTag(plan))
+	{
+		case T_SeqScan:
+		case T_SampleScan:
+		case T_IndexScan:
+		case T_IndexOnlyScan:
+		case T_BitmapHeapScan:
+		case T_TidScan:
+		case T_TidRangeScan:
+		case T_SubqueryScan:
+		case T_FunctionScan:
+		case T_TableFuncScan:
+		case T_ValuesScan:
+		case T_CteScan:
+		case T_NamedTuplestoreScan:
+		case T_WorkTableScan:
+		case T_ForeignScan:
+		case T_CustomScan:
+			return true;
+		default:
+			return false;
+	}
+}
 
 /* ----------------
  *		sequential scan node
@@ -992,6 +1036,7 @@ typedef struct Join
 	/* JOIN quals (in addition to plan.qual) */
 	List	   *joinqual;
 	Bitmapset  *ojrelids;
+
 } Join;
 
 /* ----------------
@@ -1246,6 +1291,7 @@ typedef struct Agg
 
 	/* chained Agg/Sort nodes */
 	List	   *chain;
+
 } Agg;
 
 /* ----------------

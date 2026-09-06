@@ -488,6 +488,12 @@ llvm_compile_expr(ExprState *state)
 					break;
 				}
 
+			case EEOP_SCAN_VAR_TOAST:
+				build_EvalXFunc(b, mod, "ExecEvalVarToast",
+								v_state, op, v_econtext, v_scanslot);
+				LLVMBuildBr(b, opblocks[opno + 1]);
+				break;
+
 			case EEOP_INNER_SYSVAR:
 			case EEOP_OUTER_SYSVAR:
 			case EEOP_SCAN_SYSVAR:
