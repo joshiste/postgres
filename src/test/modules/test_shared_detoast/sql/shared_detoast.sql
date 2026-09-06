@@ -93,6 +93,13 @@ RESET enable_hashjoin; RESET enable_nestloop;
 SET enable_nestloop = off; SET enable_mergejoin = off;
 SELECT count(*) FROM sd p JOIN sd2 q ON p.doc = q.doc WHERE p.doc ? 'a' AND p.doc @> '{"b": 2}';
 RESET enable_nestloop; RESET enable_mergejoin;
+-- an outer column passed down as a nestloop parameter keeps its pointer too,
+-- since the inner side (Memoize) may keep the parameter as a cache key
+CREATE INDEX sd2_doc_hash ON sd2 USING hash (doc);
+SET enable_hashjoin = off; SET enable_mergejoin = off; SET enable_seqscan = off;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM sd o JOIN sd2 q ON q.doc = o.doc WHERE o.doc ? 'a' AND o.doc @> '{"b": 2}';
+SELECT count(*) FROM sd o JOIN sd2 q ON q.doc = o.doc WHERE o.doc ? 'a' AND o.doc @> '{"b": 2}';
+RESET enable_hashjoin; RESET enable_mergejoin; RESET enable_seqscan;
 DROP TABLE sd2;
 -- a scan without projection under a parent that copies the physical tuple
 -- (Sort, hashed Agg over other columns) still detoasts once

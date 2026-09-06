@@ -171,7 +171,7 @@ bool		shared_detoast = true;
  * every candidate qualifies; otherwise only attributes that leave the node
  * inside expression results do, and a node without projection, which hands
  * its whole scan slot to the parent, gets what the planner found safe for
- * that particular parent.
+ * that particular parent (the same field, marked by predetoast_noproj).
  */
 Bitmapset *
 ExecScanPredetoastAttrs(ScanState *node, TupleDesc tupdesc, int eflags)
@@ -188,7 +188,7 @@ ExecScanPredetoastAttrs(ScanState *node, TupleDesc tupdesc, int eflags)
 
 	if (eflags & EXEC_FLAG_ROW_CONSUMER)
 		return scan->predetoast_attrs_all;
-	if (scan->predetoast_attrs_safe == NULL && scan->predetoast_attrs_noproj == NULL)
+	if (scan->predetoast_attrs_safe == NULL)
 		return NULL;
 
 	/*
@@ -202,8 +202,14 @@ ExecScanPredetoastAttrs(ScanState *node, TupleDesc tupdesc, int eflags)
 	else
 		varno = scan->scanrelid;
 
-	if (tlist_matches_tupdesc(&node->ps, plan->targetlist, varno, tupdesc))
-		return scan->predetoast_attrs_noproj;	/* whole slot is passed up */
+	/*
+	 * The safe set was computed either for this node's projection or, if the
+	 * planner expected none, for the parent receiving the whole slot.  Use it
+	 * only if the executor's projection decision agrees with that guess.
+	 */
+	if (tlist_matches_tupdesc(&node->ps, plan->targetlist, varno, tupdesc) !=
+		scan->predetoast_noproj)
+		return NULL;
 
 	return scan->predetoast_attrs_safe;
 }

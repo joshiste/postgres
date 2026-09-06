@@ -270,6 +270,35 @@ NOTICE:  notice triggered for injection point detoast-attr-external
 (1 row)
 
 RESET enable_nestloop; RESET enable_mergejoin;
+-- an outer column passed down as a nestloop parameter keeps its pointer too,
+-- since the inner side (Memoize) may keep the parameter as a cache key
+CREATE INDEX sd2_doc_hash ON sd2 USING hash (doc);
+NOTICE:  notice triggered for injection point detoast-attr-external
+SET enable_hashjoin = off; SET enable_mergejoin = off; SET enable_seqscan = off;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM sd o JOIN sd2 q ON q.doc = o.doc WHERE o.doc ? 'a' AND o.doc @> '{"b": 2}';
+                                QUERY PLAN                                
+--------------------------------------------------------------------------
+ Aggregate
+   ->  Nested Loop
+         ->  Seq Scan on sd o
+               Disabled: true
+               Filter: ((doc ? 'a'::text) AND (doc @> '{"b": 2}'::jsonb))
+         ->  Index Scan using sd2_doc_hash on sd2 q
+               Index Cond: (doc = o.doc)
+(7 rows)
+
+SELECT count(*) FROM sd o JOIN sd2 q ON q.doc = o.doc WHERE o.doc ? 'a' AND o.doc @> '{"b": 2}';
+NOTICE:  notice triggered for injection point detoast-attr-external
+NOTICE:  notice triggered for injection point detoast-attr-external
+NOTICE:  notice triggered for injection point detoast-attr-external
+NOTICE:  notice triggered for injection point detoast-attr-external
+NOTICE:  notice triggered for injection point detoast-attr-external
+ count 
+-------
+     1
+(1 row)
+
+RESET enable_hashjoin; RESET enable_mergejoin; RESET enable_seqscan;
 DROP TABLE sd2;
 -- a scan without projection under a parent that copies the physical tuple
 -- (Sort, hashed Agg over other columns) still detoasts once

@@ -2231,7 +2231,6 @@ get_relname_relid(const char *relname, Oid relnamespace)
 						   ObjectIdGetDatum(relnamespace));
 }
 
-#ifdef NOT_USED
 /*
  * get_relnatts
  *
@@ -2255,7 +2254,6 @@ get_relnatts(Oid relid)
 	else
 		return InvalidAttrNumber;
 }
-#endif
 
 /*
  * get_rel_name

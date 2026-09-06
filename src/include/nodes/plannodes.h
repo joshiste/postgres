@@ -555,11 +555,12 @@ typedef struct Scan
 	Bitmapset  *predetoast_attrs_all;
 
 	/*
-	 * The subset usable when this node hands its whole scan slot to the
-	 * parent (no projection), decided from what that parent does with the
-	 * slot (see set_child_predetoast_noproj)
+	 * True when predetoast_attrs_safe was computed for a scan that projects
+	 * nothing and hands its whole slot to the parent, in which case its
+	 * contents come from what that parent does with the slot (see
+	 * set_child_predetoast_noproj) rather than from this node's projection.
 	 */
-	Bitmapset  *predetoast_attrs_noproj;
+	bool		predetoast_noproj;
 } Scan;
 
 /*

@@ -665,7 +665,7 @@ set_scan_predetoast_attrs(PlannerInfo *root, Scan *scan)
 
 	scan->predetoast_attrs_safe = NULL;
 	scan->predetoast_attrs_all = NULL;
-	scan->predetoast_attrs_noproj = NULL;
+	scan->predetoast_noproj = false;
 
 	vars = pull_multi_detoast_vars(plan->targetlist, plan->qual, 0);
 	if (vars == NIL)
@@ -712,7 +712,28 @@ set_scan_predetoast_attrs(PlannerInfo *root, Scan *scan)
 		if (IsA(tle->expr, Var) && ((Var *) tle->expr)->varattno > 0)
 			bare = bms_add_member(bare, ((Var *) tle->expr)->varattno);
 	}
-	safe = bms_difference(all, bare);
+
+	/*
+	 * A table scan whose targetlist is exactly the table's columns in order
+	 * will project nothing and pass its slot up whole; then every attribute
+	 * is "bare" and the safe set can only come from the parent (see
+	 * set_child_predetoast_noproj).  The executor checks that this guess
+	 * matches its own projection decision before using the set.
+	 */
+	if (OidIsValid(relid) &&
+		list_length(plan->targetlist) == get_relnatts(relid) &&
+		bms_num_members(bare) == list_length(plan->targetlist))
+	{
+		scan->predetoast_noproj = true;
+		foreach(lc, plan->targetlist)
+		{
+			TargetEntry *tle = (TargetEntry *) lfirst(lc);
+
+			if (((Var *) tle->expr)->varattno != tle->resno)
+				scan->predetoast_noproj = false;
+		}
+	}
+	safe = scan->predetoast_noproj ? NULL : bms_difference(all, bare);
 	bms_free(bare);
 
 	scan->predetoast_attrs_all = all;
@@ -941,8 +962,8 @@ set_agg_predetoast_attrs(Agg *agg)
 
 /*
  * set_child_predetoast_noproj
- *		Decide which of a scan's pre-detoast candidates stay usable when the
- *		scan projects nothing and hands its whole slot to this parent.
+ *		Fill the safe set of a scan that projects nothing and hands its whole
+ *		slot to this parent, from what the parent does with that slot.
  *
  * The slot of these scan types holds a physical tuple, and a parent that
  * stores such a slot copies the tuple, never the detoasted values in the
@@ -957,7 +978,8 @@ set_child_predetoast_noproj(Plan *parent, Plan *child, Index side)
 	Scan	   *scan = (Scan *) child;
 	Bitmapset  *result;
 
-	if (child == NULL || !IsScanPlan(child) || scan->predetoast_attrs_all == NULL)
+	if (child == NULL || !IsScanPlan(child) || scan->predetoast_attrs_all == NULL ||
+		!scan->predetoast_noproj)
 		return;
 
 	switch (nodeTag(child))
@@ -1019,7 +1041,7 @@ set_child_predetoast_noproj(Plan *parent, Plan *child, Index side)
 			result = NULL;
 			break;
 	}
-	scan->predetoast_attrs_noproj = result;
+	scan->predetoast_attrs_safe = result;
 }
 
 /*
@@ -1114,7 +1136,6 @@ apply_raw_reader_vetoes(Plan *plan, Bitmapset *raw_above)
 			}
 			scan->predetoast_attrs_safe = bms_del_members(scan->predetoast_attrs_safe, attrs);
 			scan->predetoast_attrs_all = bms_del_members(scan->predetoast_attrs_all, attrs);
-			scan->predetoast_attrs_noproj = bms_del_members(scan->predetoast_attrs_noproj, attrs);
 		}
 		apply_raw_reader_vetoes(child, raw);
 	}
