@@ -554,6 +554,13 @@ typedef struct Scan
 	Bitmapset  *predetoast_attrs_safe;
 	Bitmapset  *predetoast_attrs_all;
 
+	/*
+	 * True when predetoast_attrs_safe was computed for a scan that projects
+	 * nothing and hands its whole slot to the parent, in which case its
+	 * contents come from what that parent does with the slot (see
+	 * set_child_predetoast_noproj) rather than from this node's projection.
+	 */
+	bool		predetoast_noproj;
 } Scan;
 
 /*
@@ -1037,6 +1044,15 @@ typedef struct Join
 	List	   *joinqual;
 	Bitmapset  *ojrelids;
 
+	/*
+	 * Per input side, the toastable attributes several of this node's
+	 * expressions detoast, as for Scan.predetoast_attrs_safe/_all (see
+	 * set_join_predetoast_attrs)
+	 */
+	Bitmapset  *predetoast_outer_safe;
+	Bitmapset  *predetoast_outer_all;
+	Bitmapset  *predetoast_inner_safe;
+	Bitmapset  *predetoast_inner_all;
 } Join;
 
 /* ----------------
@@ -1292,6 +1308,12 @@ typedef struct Agg
 	/* chained Agg/Sort nodes */
 	List	   *chain;
 
+	/*
+	 * Input attributes several of the aggregate arguments or quals detoast,
+	 * which the executor may detoast once per input row in the child's slot
+	 * (see set_agg_predetoast_attrs)
+	 */
+	Bitmapset  *predetoast_outer_attrs;
 } Agg;
 
 /* ----------------
