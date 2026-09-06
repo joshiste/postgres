@@ -86,6 +86,8 @@ typedef enum ExprEvalOp
 	EEOP_NEW_VAR,
 
 	/* compute Var value, detoasting it into the slot first if needed */
+	EEOP_INNER_VAR_TOAST,
+	EEOP_OUTER_VAR_TOAST,
 	EEOP_SCAN_VAR_TOAST,
 
 	/* compute system Var value */

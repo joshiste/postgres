@@ -985,10 +985,20 @@ ExecInitExprRec(Expr *node, ExprState *state,
 					switch (variable->varno)
 					{
 						case INNER_VAR:
-							scratch.opcode = EEOP_INNER_VAR;
+							if (state->parent &&
+								bms_is_member(variable->varattno,
+											  state->parent->ps_predetoast_innerattrs))
+								scratch.opcode = EEOP_INNER_VAR_TOAST;
+							else
+								scratch.opcode = EEOP_INNER_VAR;
 							break;
 						case OUTER_VAR:
-							scratch.opcode = EEOP_OUTER_VAR;
+							if (state->parent &&
+								bms_is_member(variable->varattno,
+											  state->parent->ps_predetoast_outerattrs))
+								scratch.opcode = EEOP_OUTER_VAR_TOAST;
+							else
+								scratch.opcode = EEOP_OUTER_VAR;
 							break;
 
 							/* INDEX_VAR is handled by default case */

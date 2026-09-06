@@ -279,6 +279,7 @@ ExecInitNestLoop(NestLoop *node, EState *estate, int eflags)
 	/*
 	 * Initialize result slot, type and projection.
 	 */
+	ExecInitJoinPredetoast(&nlstate->js, eflags, true, true);
 	ExecInitResultTupleSlotTL(&nlstate->js.ps, &TTSOpsVirtual);
 	ExecAssignProjectionInfo(&nlstate->js.ps, NULL);
 

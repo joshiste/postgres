@@ -605,6 +605,8 @@ extern Datum ExecMakeFunctionResultSet(SetExprState *fcache,
 extern PGDLLIMPORT bool shared_detoast;
 extern Bitmapset *ExecScanPredetoastAttrs(ScanState *node, TupleDesc tupdesc,
 										  int eflags);
+extern void ExecInitJoinPredetoast(JoinState *js, int eflags, bool outer_ok,
+								   bool inner_ok);
 
 typedef TupleTableSlot *(*ExecScanAccessMtd) (ScanState *node);
 typedef bool (*ExecScanRecheckMtd) (ScanState *node, TupleTableSlot *slot);
