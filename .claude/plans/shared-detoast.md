@@ -116,6 +116,22 @@ all fixed in one commit with tests:
 - /simplify was not run as a skill (same budget reason); simplifications applied by
   hand: shared helpers for aggregate-kept and nestloop-parameter attributes.
 
+## Review follow-ups (2026-09-06)
+
+- Item 6: Scan.predetoast_attrs_noproj folded into predetoast_attrs_safe plus a flag
+  predetoast_noproj; the executor uses the set only if its projection decision matches
+  the planner's guess. get_relnatts() revived for that guess. (e622638450)
+- Item 7: module test for the nestloop-parameter exclusion (hash index on doc,
+  parameterized inner scan; 5 detoasts with the exclusion, 2 without).
+- Item 13/11: `shared-detoast` is now four commits without the notes: mechanism and
+  scan decision (31 files, +864/-13), joins/aggregates/parent rules (15 files,
+  +475/-12), EXPLAIN and tests (14 files, +714/-13), doc. Each intermediate tree was
+  built and verified (A: guard phase 1 and regression; B: guard phase 6 and
+  regression; C: module, regression, postgres_fdw). The notes stay on detoast-plan2.
+- Items 15 and 4 (planning cost on small statements, short-header widening) need the
+  VM, which stopped resolving by name on 2026-09-06; pending.
+- Item 12: review skills to be rerun on the split series.
+
 ## Rebase log
 
 - 2026-09-03: rebased from e073b64d33 onto upstream master 534db08f97 (7 commits);
