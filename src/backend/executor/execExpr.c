@@ -997,7 +997,12 @@ ExecInitExprRec(Expr *node, ExprState *state,
 							switch (variable->varreturningtype)
 							{
 								case VAR_RETURNING_DEFAULT:
-									scratch.opcode = EEOP_SCAN_VAR;
+									if (state->parent &&
+										bms_is_member(variable->varattno,
+													  state->parent->ps_predetoast_scanattrs))
+										scratch.opcode = EEOP_SCAN_VAR_TOAST;
+									else
+										scratch.opcode = EEOP_SCAN_VAR;
 									break;
 								case VAR_RETURNING_OLD:
 									scratch.opcode = EEOP_OLD_VAR;

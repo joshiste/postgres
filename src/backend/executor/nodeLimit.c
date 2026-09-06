@@ -474,7 +474,8 @@ ExecInitLimit(Limit *node, EState *estate, int eflags)
 	 * initialize outer plan
 	 */
 	outerPlan = outerPlan(node);
-	outerPlanState(limitstate) = ExecInitNode(outerPlan, estate, eflags);
+	outerPlanState(limitstate) = ExecInitNode(outerPlan, estate,
+											  EXEC_PASS_ROW_CONSUMER(eflags));
 
 	/*
 	 * initialize child expressions
