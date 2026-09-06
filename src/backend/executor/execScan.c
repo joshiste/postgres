@@ -193,8 +193,39 @@ ExecScanPredetoastAttrs(ScanState *node, TupleDesc tupdesc, int eflags)
 	/* the same rule the scan nodes use for their projection varno */
 	varno = ScanUsesIndexVar(plan) ? INDEX_VAR : scan->scanrelid;
 
-	if (tlist_matches_tupdesc(&node->ps, plan->targetlist, varno, tupdesc))
-		return NULL;			/* no projection: the whole slot is passed up */
+	/*
+	 * The safe set was computed either for this node's projection or, if the
+	 * planner expected none, for the parent receiving the whole slot.  Use it
+	 * only if the executor's projection decision agrees with that guess.
+	 */
+	if (tlist_matches_tupdesc(&node->ps, plan->targetlist, varno, tupdesc) !=
+		scan->predetoast_noproj)
+		return NULL;
 
 	return scan->predetoast_attrs_safe;
+}
+
+/*
+ * ExecInitJoinPredetoast
+ *		Join counterpart of ExecScanPredetoastAttrs: choose, per input side,
+ *		the planner-recorded set the join's expressions may detoast in place.
+ *
+ * Joins always project, so without EXEC_FLAG_ROW_CONSUMER the safe set applies.
+ * The caller says which sides are eligible; a side whose tuples the node
+ * itself copies (MergeJoin's marked inner tuple) is not.
+ */
+void
+ExecInitJoinPredetoast(JoinState *js, int eflags, bool outer_ok, bool inner_ok)
+{
+	Join	   *join = (Join *) js->ps.plan;
+	bool		permitted = (eflags & EXEC_FLAG_ROW_CONSUMER) != 0;
+
+	if (!shared_detoast)
+		return;
+	if (outer_ok)
+		js->ps.ps_predetoast_outerattrs =
+			permitted ? join->predetoast_outer_all : join->predetoast_outer_safe;
+	if (inner_ok)
+		js->ps.ps_predetoast_innerattrs =
+			permitted ? join->predetoast_inner_all : join->predetoast_inner_safe;
 }

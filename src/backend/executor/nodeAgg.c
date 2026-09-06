@@ -3409,6 +3409,10 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 	outerPlan = outerPlan(node);
 	outerPlanState(aggstate) = ExecInitNode(outerPlan, estate, eflags);
 
+	/* input attributes the aggregate arguments may detoast in place */
+	if (shared_detoast)
+		aggstate->ss.ps.ps_predetoast_outerattrs = node->predetoast_outer_attrs;
+
 	/*
 	 * initialize source tuple type.
 	 */

@@ -139,6 +139,9 @@ static void add_rte_to_flat_rtable(PlannerGlobal *glob, List *rteperminfos,
 static Plan *set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset);
 static void set_scan_predetoast_attrs(PlannerInfo *root, Scan *scan);
 static List *plan_input_plans(Plan *child, List *result);
+static void set_join_predetoast_attrs(Join *join);
+static void set_agg_predetoast_attrs(Agg *agg);
+static void set_child_predetoast_noproj(Plan *parent, Plan *child, Index side);
 static void apply_raw_reader_vetoes(Plan *plan, Bitmapset *raw_above);
 static void veto_input_plan(Plan *plan, Bitmapset *raw);
 static Plan *set_indexonlyscan_references(PlannerInfo *root,
@@ -665,6 +668,10 @@ set_scan_predetoast_attrs(PlannerInfo *root, Scan *scan)
 
 	scan->predetoast_attrs_safe = NULL;
 	scan->predetoast_attrs_all = NULL;
+	scan->predetoast_noproj = false;
+
+	if (!shared_detoast)
+		return;
 
 	vars = pull_multi_detoast_vars(plan->targetlist, plan->qual, 0);
 	if (vars == NIL)
@@ -710,7 +717,27 @@ set_scan_predetoast_attrs(PlannerInfo *root, Scan *scan)
 		bare = pull_passthrough_attrs((Node *) tle->expr, 0, bare);
 	}
 
-	safe = bms_difference(all, bare);
+	/*
+	 * A table scan whose targetlist is exactly the table's columns in order
+	 * will project nothing and pass its slot up whole; then every attribute
+	 * is "bare" and the safe set can only come from the parent (see
+	 * set_child_predetoast_noproj).  The executor checks that this guess
+	 * matches its own projection decision before using the set.
+	 */
+	if (OidIsValid(relid) &&
+		list_length(plan->targetlist) == get_relnatts(relid) &&
+		bms_num_members(bare) == list_length(plan->targetlist))
+	{
+		scan->predetoast_noproj = true;
+		foreach(lc, plan->targetlist)
+		{
+			TargetEntry *tle = (TargetEntry *) lfirst(lc);
+
+			if (((Var *) tle->expr)->varattno != tle->resno)
+				scan->predetoast_noproj = false;
+		}
+	}
+	safe = scan->predetoast_noproj ? NULL : bms_difference(all, bare);
 	bms_free(bare);
 
 	scan->predetoast_attrs_all = all;
@@ -750,16 +777,374 @@ plan_input_plans(Plan *child, List *result)
 }
 
 /*
+ * set_join_predetoast_attrs
+ *		Same as set_scan_predetoast_attrs, per input side of a join.
+ *
+ * The join's expressions see its inputs through OUTER_VAR and INNER_VAR;
+ * a detoasted value is written into the child's slot, so the same rules
+ * apply as for a scan's own slot.  Attributes used in the merge or hash
+ * clauses are left out: those are evaluated when a tuple is fetched, before
+ * it may be spilled or hashed, so they must keep their toast pointers.  So
+ * are outer attributes passed down as nestloop parameters, which the inner
+ * side may keep.
+ */
+static void
+set_join_predetoast_attrs(Join *join)
+{
+	Plan	   *plan = &join->plan;
+	List	   *quals = list_concat_copy(join->joinqual, plan->qual);
+	List	   *keyvars = NIL;
+	Index		sides[2] = {OUTER_VAR, INNER_VAR};
+	ListCell   *lc;
+
+	if (!shared_detoast)
+		return;
+
+	if (IsA(join, MergeJoin))
+		keyvars = pull_var_clause((Node *) ((MergeJoin *) join)->mergeclauses, 0);
+	else if (IsA(join, HashJoin))
+		keyvars = pull_var_clause((Node *) ((HashJoin *) join)->hashclauses, 0);
+	else if (IsA(join, NestLoop))
+	{
+		ListCell   *plc;
+
+		foreach(plc, ((NestLoop *) join)->nestParams)
+			keyvars = lappend(keyvars, ((NestLoopParam *) lfirst(plc))->paramval);
+	}
+
+	for (int side = 0; side < 2; side++)
+	{
+		List	   *vars = pull_multi_detoast_vars(plan->targetlist, quals,
+												   sides[side]);
+		Plan	   *child = sides[side] == OUTER_VAR ?
+			plan->lefttree : plan->righttree;
+		Bitmapset  *all = NULL;
+		Bitmapset  *safe = NULL;
+		Bitmapset  *bare = NULL;
+
+		foreach(lc, vars)
+		{
+			Var		   *var = (Var *) lfirst(lc);
+			Node	   *cexpr;
+
+			if (get_typlen(var->vartype) != -1 ||
+				get_typstorage(var->vartype) == TYPSTORAGE_PLAIN)
+				continue;
+
+			/*
+			 * A constant the child computes is never toasted.  The child's
+			 * targetlist is not fixed yet, so it may still be wrapped in a
+			 * PlaceHolderVar.
+			 */
+			cexpr = (Node *) list_nth_node(TargetEntry, child->targetlist,
+										   var->varattno - 1)->expr;
+			while (IsA(cexpr, PlaceHolderVar))
+				cexpr = (Node *) ((PlaceHolderVar *) cexpr)->phexpr;
+			if (IsA(cexpr, Const))
+				continue;
+			all = bms_add_member(all, var->varattno);
+		}
+		list_free(vars);
+		if (all == NULL)
+			continue;
+
+		foreach(lc, keyvars)
+		{
+			Var		   *var = (Var *) lfirst(lc);
+
+			if (var->varno == sides[side] && var->varattno > 0)
+				all = bms_del_member(all, var->varattno);
+		}
+		foreach(lc, plan->targetlist)
+		{
+			TargetEntry *tle = (TargetEntry *) lfirst(lc);
+
+			bare = pull_passthrough_attrs((Node *) tle->expr, sides[side], bare);
+		}
+		safe = bms_difference(all, bare);
+		bms_free(bare);
+
+		if (sides[side] == OUTER_VAR)
+		{
+			join->predetoast_outer_all = all;
+			join->predetoast_outer_safe = safe;
+		}
+		else
+		{
+			join->predetoast_inner_all = all;
+			join->predetoast_inner_safe = safe;
+		}
+	}
+	list_free(quals);
+	list_free(keyvars);
+}
+
+/*
+ * bare_vars_of_side
+ *		Attribute numbers of plain Vars of the given varno in a targetlist.
+ */
+static Bitmapset *
+bare_vars_of_side(List *targetlist, Index varno)
+{
+	Bitmapset  *result = NULL;
+	ListCell   *lc;
+
+	foreach(lc, targetlist)
+	{
+		TargetEntry *tle = (TargetEntry *) lfirst(lc);
+
+		result = pull_passthrough_attrs((Node *) tle->expr, varno, result);
+	}
+	return result;
+}
+
+/*
+ * agg_kept_input_attrs
+ *		Input attributes an Agg node may keep beyond the current row: its
+ *		grouping columns when hashing (copied out of the input slot) and any
+ *		column passed whole to an aggregate, whose transition state or sort
+ *		may hold the datum.
+ */
+static Bitmapset *
+agg_kept_input_attrs(Agg *agg)
+{
+	Bitmapset  *result = NULL;
+	List	   *aggrefs;
+	ListCell   *lc;
+
+	if (agg->aggstrategy == AGG_HASHED || agg->aggstrategy == AGG_MIXED)
+		for (int i = 0; i < agg->numCols; i++)
+			result = bms_add_member(result, agg->grpColIdx[i]);
+
+	aggrefs = pull_var_clause((Node *) agg->plan.targetlist,
+							  PVC_INCLUDE_AGGREGATES);
+	aggrefs = list_concat(aggrefs,
+						  pull_var_clause((Node *) agg->plan.qual,
+										  PVC_INCLUDE_AGGREGATES));
+	foreach(lc, aggrefs)
+	{
+		Aggref	   *aggref = (Aggref *) lfirst(lc);
+		ListCell   *alc;
+
+		if (!IsA(aggref, Aggref))
+			continue;
+		foreach(alc, aggref->args)
+		{
+			Node	   *arg = (Node *) ((TargetEntry *) lfirst(alc))->expr;
+
+			result = pull_passthrough_attrs(arg, OUTER_VAR, result);
+		}
+	}
+	list_free(aggrefs);
+	return result;
+}
+
+/*
+ * agg_spilled_input_attrs
+ *		Input attributes a hashed Agg copies by value when it spills: every
+ *		input column its targetlist or quals read, the plan-time counterpart
+ *		of find_cols() in nodeAgg.c (hashagg_spill_tuple takes the needed
+ *		columns out of the input slot's values rather than copying the
+ *		tuple).  A detoasted value in the child's slot would go to disk
+ *		whole, so a child below a hashed Agg may not detoast these in place.
+ */
+static Bitmapset *
+agg_spilled_input_attrs(Agg *agg)
+{
+	Bitmapset  *result = NULL;
+	List	   *vars;
+	ListCell   *lc;
+
+	if (agg->aggstrategy != AGG_HASHED && agg->aggstrategy != AGG_MIXED)
+		return NULL;
+
+	vars = pull_var_clause((Node *) agg->plan.targetlist,
+						   PVC_RECURSE_AGGREGATES);
+	vars = list_concat(vars,
+					   pull_var_clause((Node *) agg->plan.qual,
+									   PVC_RECURSE_AGGREGATES));
+	foreach(lc, vars)
+	{
+		Var		   *var = (Var *) lfirst(lc);
+
+		if (var->varno == OUTER_VAR && var->varattno > 0)
+			result = bms_add_member(result, var->varattno);
+	}
+	list_free(vars);
+	return result;
+}
+
+/*
+ * nestloop_param_attrs
+ *		Outer attributes a NestLoop passes down as parameters; the inner side
+ *		may keep those (Memoize uses them as cache keys).
+ */
+static Bitmapset *
+nestloop_param_attrs(NestLoop *nl)
+{
+	Bitmapset  *result = NULL;
+	ListCell   *lc;
+
+	foreach(lc, nl->nestParams)
+	{
+		NestLoopParam *nlp = (NestLoopParam *) lfirst(lc);
+
+		if (IsA(nlp->paramval, Var) && nlp->paramval->varattno > 0)
+			result = bms_add_member(result, nlp->paramval->varattno);
+	}
+	return result;
+}
+
+/*
+ * set_agg_predetoast_attrs
+ *		Same as set_join_predetoast_attrs, for the input of an Agg node:
+ *		aggregate arguments and quals that detoast the same input column
+ *		more than once.
+ *
+ * Grouping columns of a hashed Agg and columns passed whole to an aggregate
+ * are excluded (see agg_kept_input_attrs); so are bare output Vars, which
+ * the projection would carry onward.  Grouping sets and mixed strategies are
+ * left alone.
+ */
+static void
+set_agg_predetoast_attrs(Agg *agg)
+{
+	Plan	   *plan = &agg->plan;
+	List	   *vars;
+	Bitmapset  *attrs = NULL;
+	Bitmapset  *excluded;
+	ListCell   *lc;
+
+	agg->predetoast_outer_attrs = NULL;
+	if (!shared_detoast)
+		return;
+
+	if (agg->aggstrategy == AGG_MIXED || agg->groupingSets != NIL ||
+		agg->chain != NIL)
+		return;
+
+	vars = pull_multi_detoast_vars(plan->targetlist, plan->qual, OUTER_VAR);
+	foreach(lc, vars)
+	{
+		Var		   *var = (Var *) lfirst(lc);
+
+		if (get_typlen(var->vartype) == -1 &&
+			get_typstorage(var->vartype) != TYPSTORAGE_PLAIN)
+			attrs = bms_add_member(attrs, var->varattno);
+	}
+	list_free(vars);
+	if (attrs == NULL)
+		return;
+
+	excluded = bms_join(bare_vars_of_side(plan->targetlist, OUTER_VAR),
+						agg_kept_input_attrs(agg));
+
+	agg->predetoast_outer_attrs = bms_difference(attrs, excluded);
+	bms_free(attrs);
+	bms_free(excluded);
+}
+
+/*
+ * set_child_predetoast_noproj
+ *		Fill the safe set of a scan that projects nothing and hands its whole
+ *		slot to this parent, from what the parent does with that slot.
+ *
+ * The slot of these scan types holds a physical tuple, and a parent that
+ * stores such a slot copies the tuple, never the detoasted values in the
+ * slot's arrays.  What can carry a detoasted value onward is a parent that
+ * projects it as a bare Var into a virtual slot, an Agg that keeps grouping
+ * columns or whole aggregate arguments or spills input columns by value,
+ * and a NestLoop passing it down as a parameter.  Any other parent is
+ * treated as unknown and gets nothing.
+ */
+static void
+set_child_predetoast_noproj(Plan *parent, Plan *child, Index side)
+{
+	Scan	   *scan = (Scan *) child;
+	Bitmapset  *result;
+
+	if (child == NULL || !IsScanPlan(child) || scan->predetoast_attrs_all == NULL ||
+		!scan->predetoast_noproj)
+		return;
+
+	switch (nodeTag(child))
+	{
+		case T_IndexOnlyScan:	/* virtual slot */
+		case T_ValuesScan:
+		case T_SubqueryScan:	/* the subquery's result slot */
+		case T_CustomScan:		/* slot type up to the provider */
+			return;
+		default:
+			break;
+	}
+
+	result = bms_copy(scan->predetoast_attrs_all);
+	switch (nodeTag(parent))
+	{
+		case T_Sort:
+		case T_IncrementalSort:
+		case T_Material:
+		case T_Memoize:
+		case T_Hash:
+		case T_Unique:
+		case T_Group:
+		case T_Gather:
+		case T_GatherMerge:
+		case T_WindowAgg:
+		case T_SetOp:
+		case T_RecursiveUnion:
+			break;
+		case T_Agg:
+			{
+				Agg		   *agg = (Agg *) parent;
+
+				if (agg->aggstrategy == AGG_MIXED || agg->groupingSets != NIL)
+					result = NULL;
+				else
+				{
+					result = bms_del_members(result, agg_kept_input_attrs(agg));
+					result = bms_del_members(result, agg_spilled_input_attrs(agg));
+				}
+				break;
+			}
+		case T_NestLoop:
+			if (side == OUTER_VAR)
+				result = bms_del_members(result,
+										 nestloop_param_attrs((NestLoop *) parent));
+			pg_fallthrough;
+		case T_Result:
+		case T_ProjectSet:
+		case T_HashJoin:
+			result = bms_del_members(result,
+									 bare_vars_of_side(parent->targetlist, side));
+			break;
+		case T_MergeJoin:
+			if (side == OUTER_VAR)
+				result = bms_del_members(result,
+										 bare_vars_of_side(parent->targetlist, side));
+			else
+				result = NULL;
+			break;
+		default:
+			result = NULL;
+			break;
+	}
+	scan->predetoast_attrs_safe = result;
+}
+
+/*
  * apply_raw_reader_vetoes
  *		Walk the finished plan tree top-down and take out of every scan's
  *		pre-detoast sets the attributes some ancestor passes to a function
  *		that reads the stored representation.
  *
- * A scan node already excludes such attributes for its own expressions; an
- * ancestor can only see the scan's value through bare Vars, so raw_above
+ * A node already excludes such attributes for its own expressions; an
+ * ancestor can only see a child's value through bare Vars, so raw_above
  * (output attribute numbers of this node that an ancestor reads raw) is
  * mapped through this node's targetlist and joined with the node's own raw
- * reads before it is handed to the children.
+ * reads before it is handed to the children.  Nestloop parameters are
+ * treated the same way.  Both a join's per-side sets and a child scan's sets
+ * are trimmed, since either may include bare-projected attributes.
  */
 static void
 apply_raw_reader_vetoes(Plan *plan, Bitmapset *raw_above)
@@ -783,6 +1168,8 @@ apply_raw_reader_vetoes(Plan *plan, Bitmapset *raw_above)
 
 	exprs = list_copy(plan->targetlist);
 	exprs = list_concat(exprs, plan->qual);
+	if (IsA(plan, NestLoop) || IsA(plan, MergeJoin) || IsA(plan, HashJoin))
+		exprs = list_concat(exprs, ((Join *) plan)->joinqual);
 
 	for (int side = 0; side < 2; side++)
 	{
@@ -812,6 +1199,38 @@ apply_raw_reader_vetoes(Plan *plan, Bitmapset *raw_above)
 
 			if (bms_is_member(tle->resno, raw_above))
 				raw = pull_passthrough_attrs((Node *) tle->expr, varno, raw);
+		}
+
+		/*
+		 * Outer columns a NestLoop passes down as parameters must keep their
+		 * stored form as well: the inner side may read them raw or keep them.
+		 */
+		if (IsA(plan, NestLoop) && varno == OUTER_VAR)
+			raw = bms_add_members(raw, nestloop_param_attrs((NestLoop *) plan));
+
+		/*
+		 * A join's own per-side sets may hold bare-projected attributes for
+		 * the permission case; take out what an ancestor reads raw.
+		 */
+		if (raw != NULL && (IsA(plan, NestLoop) || IsA(plan, MergeJoin) ||
+							IsA(plan, HashJoin)))
+		{
+			Join	   *join = (Join *) plan;
+
+			if (varno == OUTER_VAR)
+			{
+				join->predetoast_outer_safe =
+					bms_del_members(join->predetoast_outer_safe, raw);
+				join->predetoast_outer_all =
+					bms_del_members(join->predetoast_outer_all, raw);
+			}
+			else
+			{
+				join->predetoast_inner_safe =
+					bms_del_members(join->predetoast_inner_safe, raw);
+				join->predetoast_inner_all =
+					bms_del_members(join->predetoast_inner_all, raw);
+			}
 		}
 
 		{
@@ -1215,6 +1634,7 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 				}
 
 				set_upper_references(root, plan, rtoffset);
+				set_agg_predetoast_attrs(agg);
 			}
 			break;
 		case T_Group:
@@ -1592,6 +2012,17 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 	 */
 	plan->lefttree = set_plan_refs(root, plan->lefttree, rtoffset);
 	plan->righttree = set_plan_refs(root, plan->righttree, rtoffset);
+
+	for (int side = 0; side < 2; side++)
+	{
+		Plan	   *child = side == 0 ? plan->lefttree : plan->righttree;
+		List	   *members = plan_input_plans(child, NIL);
+
+		foreach_ptr(Plan, member, members)
+			set_child_predetoast_noproj(plan, member,
+										side == 0 ? OUTER_VAR : INNER_VAR);
+		list_free(members);
+	}
 
 	return plan;
 }
@@ -2742,6 +3173,8 @@ set_join_references(PlannerInfo *root, Join *join, int rtoffset)
 									rtoffset,
 									(bms_is_empty(join->ojrelids) ? NRM_EQUAL : NRM_SUPERSET),
 									NUM_EXEC_QUAL((Plan *) join));
+
+	set_join_predetoast_attrs(join);
 
 	pfree(outer_itlist);
 	pfree(inner_itlist);
