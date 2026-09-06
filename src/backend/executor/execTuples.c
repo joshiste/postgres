@@ -955,6 +955,8 @@ tts_buffer_heap_store_tuple(TupleTableSlot *slot, HeapTuple tuple,
 		slot->tts_flags &= ~TTS_FLAG_SHOULDFREE;
 	}
 
+	/* every refill path, including copyslot, invalidates tts_values */
+	ExecSlotResetDetoast(slot);
 	slot->tts_flags &= ~TTS_FLAG_EMPTY;
 	slot->tts_nvalid = 0;
 	bslot->base.tuple = tuple;
@@ -1476,6 +1478,11 @@ ExecResetTupleTable(List *tupleTable,	/* tuple table */
 		/* Always release resources and reset the slot to empty */
 		ExecClearTuple(slot);
 		slot->tts_ops->release(slot);
+		if (slot->tts_detoast_cxt)
+		{
+			MemoryContextDelete(slot->tts_detoast_cxt);
+			slot->tts_detoast_cxt = NULL;
+		}
 		if (slot->tts_tupleDescriptor)
 		{
 			ReleaseTupleDesc(slot->tts_tupleDescriptor);
@@ -1533,6 +1540,8 @@ ExecDropSingleTupleTableSlot(TupleTableSlot *slot)
 	Assert(IsA(slot, TupleTableSlot));
 	ExecClearTuple(slot);
 	slot->tts_ops->release(slot);
+	if (slot->tts_detoast_cxt)
+		MemoryContextDelete(slot->tts_detoast_cxt);
 	if (slot->tts_tupleDescriptor)
 		ReleaseTupleDesc(slot->tts_tupleDescriptor);
 	if (!TTS_FIXED(slot))
@@ -1644,6 +1653,7 @@ ExecStoreHeapTuple(HeapTuple tuple,
 
 	if (unlikely(!TTS_IS_HEAPTUPLE(slot)))
 		elog(ERROR, "trying to store a heap tuple into wrong type of slot");
+	ExecSlotResetDetoast(slot);
 	tts_heap_store_tuple(slot, tuple, shouldFree);
 
 	slot->tts_tableOid = tuple->t_tableOid;
@@ -1738,6 +1748,7 @@ ExecStoreMinimalTuple(MinimalTuple mtup,
 
 	if (unlikely(!TTS_IS_MINIMALTUPLE(slot)))
 		elog(ERROR, "trying to store a minimal tuple into wrong type of slot");
+	ExecSlotResetDetoast(slot);
 	tts_minimal_store_tuple(slot, mtup, shouldFree);
 
 	return slot;
@@ -1817,6 +1828,15 @@ ExecForceStoreMinimalTuple(MinimalTuple mtup,
 			pfree(mtup);
 		}
 	}
+}
+
+/*
+ * Out-of-line part of ExecSlotResetDetoast(); see tuptable.h.
+ */
+void
+ExecResetSlotDetoastContext(TupleTableSlot *slot)
+{
+	MemoryContextReset(slot->tts_detoast_cxt);
 }
 
 /* --------------------------------
@@ -2100,6 +2120,8 @@ ExecInitScanTupleSlot(EState *estate, ScanState *scanstate,
 	scanstate->ps.scanopsfixed = tupledesc != NULL;
 	scanstate->ps.scanops = tts_ops;
 	scanstate->ps.scanopsset = true;
+	scanstate->ps.ps_predetoast_scanattrs =
+		ExecScanPredetoastAttrs(scanstate, tupledesc, estate->es_init_eflags);
 }
 
 /* ----------------

@@ -144,6 +144,7 @@ ExecInitNode(Plan *node, EState *estate, int eflags)
 	PlanState  *result;
 	List	   *subps;
 	ListCell   *l;
+	int			save_init_eflags;
 
 	/*
 	 * do nothing when we get to the end of a leaf on tree.
@@ -157,6 +158,18 @@ ExecInitNode(Plan *node, EState *estate, int eflags)
 	 * stack isn't overrun while initializing the node tree.
 	 */
 	check_stack_depth();
+
+	/*
+	 * A child may detoast scan values in place only if its parent explicitly
+	 * granted that (see EXEC_FLAG_ROW_CONSUMER in executor.h).  Translate the
+	 * grant into the permission the child sees, and remember the child's
+	 * flags for code that runs during its initialization without access to
+	 * them.
+	 */
+	eflags = (eflags & ~(EXEC_FLAG_ROW_CONSUMER | EXEC_FLAG_GRANT_ROW_CONSUMER)) |
+		((eflags & EXEC_FLAG_GRANT_ROW_CONSUMER) ? EXEC_FLAG_ROW_CONSUMER : 0);
+	save_init_eflags = estate->es_init_eflags;
+	estate->es_init_eflags = eflags;
 
 	switch (nodeTag(node))
 	{
@@ -387,6 +400,8 @@ ExecInitNode(Plan *node, EState *estate, int eflags)
 			result = NULL;		/* keep compiler quiet */
 			break;
 	}
+
+	estate->es_init_eflags = save_init_eflags;
 
 	ExecSetExecProcNode(result, result->ExecProcNode);
 

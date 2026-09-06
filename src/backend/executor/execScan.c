@@ -154,3 +154,47 @@ ExecScanReScan(ScanState *node)
 		}
 	}
 }
+
+/* Detoast a toasted column once per row when several expressions reference it */
+bool		shared_detoast = true;
+
+/*
+ * ExecScanPredetoastAttrs
+ *		Which scan-slot attributes this node may detoast in place.
+ *
+ * The planner recorded the candidates (see set_scan_predetoast_attrs); what
+ * remains here is the part only the executor knows.  A detoasted value written
+ * back into the scan slot is visible to any parent that reads the slot or a
+ * projection of it, which is harmless as long as it never gets copied into a
+ * stored tuple.  With EXEC_FLAG_ROW_CONSUMER the parent chain guarantees that,
+ * so every candidate qualifies; otherwise only attributes that leave the node
+ * inside expression results do, and a node without projection, which hands
+ * its whole scan slot to the parent, gets what the planner found safe for
+ * that particular parent (the same field, marked by predetoast_noproj).
+ */
+Bitmapset *
+ExecScanPredetoastAttrs(ScanState *node, TupleDesc tupdesc, int eflags)
+{
+	Plan	   *plan = node->ps.plan;
+	Scan	   *scan = (Scan *) plan;
+	int			varno;
+
+	/* Agg, Sort and others embed a ScanState too; only real scans qualify */
+	if (!shared_detoast || tupdesc == NULL || !IsScanPlan(plan))
+		return NULL;
+	if (scan->predetoast_attrs_all == NULL)
+		return NULL;
+
+	if (eflags & EXEC_FLAG_ROW_CONSUMER)
+		return scan->predetoast_attrs_all;
+	if (scan->predetoast_attrs_safe == NULL)
+		return NULL;
+
+	/* the same rule the scan nodes use for their projection varno */
+	varno = ScanUsesIndexVar(plan) ? INDEX_VAR : scan->scanrelid;
+
+	if (tlist_matches_tupdesc(&node->ps, plan->targetlist, varno, tupdesc))
+		return NULL;			/* no projection: the whole slot is passed up */
+
+	return scan->predetoast_attrs_safe;
+}

@@ -85,6 +85,9 @@ typedef enum ExprEvalOp
 	EEOP_OLD_VAR,
 	EEOP_NEW_VAR,
 
+	/* compute Var value, detoasting it into the slot first if needed */
+	EEOP_SCAN_VAR_TOAST,
+
 	/* compute system Var value */
 	EEOP_INNER_SYSVAR,
 	EEOP_OUTER_SYSVAR,
@@ -904,6 +907,8 @@ extern void ExecEvalSubPlan(ExprState *state, ExprEvalStep *op,
 							ExprContext *econtext);
 extern void ExecEvalWholeRowVar(ExprState *state, ExprEvalStep *op,
 								ExprContext *econtext);
+extern void ExecEvalVarToast(ExprState *state, ExprEvalStep *op,
+							 ExprContext *econtext, TupleTableSlot *slot);
 extern void ExecEvalSysVar(ExprState *state, ExprEvalStep *op,
 						   ExprContext *econtext, TupleTableSlot *slot);
 
