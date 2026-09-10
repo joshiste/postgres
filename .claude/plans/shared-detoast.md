@@ -130,7 +130,10 @@ all fixed in one commit with tests:
   regression; C: module, regression, postgres_fdw). The notes stay on detoast-plan2.
 - Items 15 and 4 (planning cost on small statements, short-header widening) need the
   VM, which stopped resolving by name on 2026-09-06; pending.
-- Item 12: review skills to be rerun on the split series.
+- Item 12: /code-review at low effort completed on the split series and found two
+  gaps of the ancestor-raw-reader family (join sets under permission, nestloop
+  parameters under permission); fixed in apply_raw_reader_vetoes with two module
+  cases. The earlier high/medium runs had hit the session rate limit.
 
 ## Rebase log
 
