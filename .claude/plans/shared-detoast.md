@@ -129,7 +129,12 @@ all fixed in one commit with tests:
   built and verified (A: guard phase 1 and regression; B: guard phase 6 and
   regression; C: module, regression, postgres_fdw). The notes stay on detoast-plan2.
 - Items 15 and 4 (planning cost on small statements, short-header widening) need the
-  VM, which stopped resolving by name on 2026-09-06; pending.
+  VM, which stopped resolving by name on 2026-09-06 and was still unreachable on
+  2026-09-10; pending. The short-header variant is prepared on branch
+  detoast-shortheader (builds, guard 30/30) and only needs the instruction counts.
+- 2026-09-10: the macOS temp cleaner had removed parts of the scratchpad build after
+  four idle days; rebuilt from scratch, branch tip re-verified (module, guard, regress).
+  Series regenerated: 864 / 508 / 747 / 20 lines added per commit.
 - Item 12: /code-review at low effort completed on the split series and found two
   gaps of the ancestor-raw-reader family (join sets under permission, nestloop
   parameters under permission); fixed in apply_raw_reader_vetoes with two module
