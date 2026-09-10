@@ -244,6 +244,9 @@ typedef struct PlannerGlobal
 	/* highest plan node ID assigned */
 	int			lastPlanNodeId;
 
+	/* does any node carry attributes to detoast in place? */
+	bool		hasPredetoastAttrs;
+
 	/* redo plan when TransactionXmin changes? */
 	bool		transientPlan;
 
