@@ -128,10 +128,13 @@ all fixed in one commit with tests:
   +475/-12), EXPLAIN and tests (14 files, +714/-13), doc. Each intermediate tree was
   built and verified (A: guard phase 1 and regression; B: guard phase 6 and
   regression; C: module, regression, postgres_fdw). The notes stay on detoast-plan2.
-- Items 15 and 4 (planning cost on small statements, short-header widening) need the
-  VM, which stopped resolving by name on 2026-09-06 and was still unreachable on
-  2026-09-10; pending. The short-header variant is prepared on branch
-  detoast-shortheader (builds, guard 30/30) and only needs the instruction counts.
+- Item 15 (2026-09-10): planning cost is +547 instructions on the no-help statement
+  and +2,489 (4% of its planning) on the two-reference jsonb statement, paid once per
+  plan; numbers in the baseline file, with a possible follow-up (skip get_attstorage
+  when the type decides).
+- Item 4 (2026-09-10): short-header widening loses 1.9% on the two-reference inline
+  statement and wins 1.4% on the 20-reference one; not adopted, branch deleted. A
+  plan-time reference-count threshold would be the way to revisit.
 - 2026-09-10: the macOS temp cleaner had removed parts of the scratchpad build after
   four idle days; rebuilt from scratch, branch tip re-verified (module, guard, regress).
   Series regenerated: 864 / 508 / 747 / 20 lines added per commit.

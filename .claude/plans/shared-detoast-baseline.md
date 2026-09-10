@@ -114,3 +114,33 @@ The receiver check in InitPlan and the (empty) raw-reader pass account for part 
 the step from the Phase 6 build; the rest is layout, as before. Guard 30/30 at phase
 6, identity kept, cassert check-world clean on the VM. These are the final numbers
 for the series as pushed.
+
+## Items 15 and 4 (2026-09-10, eddie-debian, tip c39abcd666 vs base)
+
+Planning cost on the small statements (plan_cache_mode forced; instr/iter, 1 round of
+100000):
+
+| workload   | generic base | generic tip | custom base | custom tip | planning delta |
+|------------|-------------:|------------:|------------:|-----------:|---------------:|
+| loop_noop  |       24,151 |      24,196 |      68,981 |     69,573 | +547 (1.2% of ~45k) |
+| loop_jsonb |       32,366 |      32,515 |      93,698 |     96,336 | +2,489 (4.1% of ~61k) |
+
+The planning delta is the custom-plan delta minus the generic-plan (execution) delta.
+For a statement with a candidate column (loop_jsonb) the planner pays about 2.5k
+instructions: the reference walk, the toastability syscache lookups, bitmap
+allocations and the raw-reader pass. Paid once per plan; visible only under forced
+custom plans or unparameterized statements planned every time. A follow-up could skip
+get_attstorage when the type's default storage already decides, or cache per relation.
+
+Short-header widening (branch detoast-shortheader, generic plans, instr/iter):
+
+| workload   | tip       | with widening | delta |
+|------------|----------:|--------------:|------:|
+| loop_noop  |    24,181 |        24,179 |    -2 |
+| loop_jsonb |    32,500 |        33,112 |  +612 (+1.9%) |
+| loop_wide  | 5,112,404 |     5,039,556 | -72,848 (-1.4%) |
+
+Widening a short-header value once into the slot context costs more than two plain
+short-header copies (out-of-line call, context creation and per-row reset) and only
+pays off with many references per row. Not adopted; a reference-count threshold at
+plan time would be the way to revisit it. The experiment branch is deleted.
