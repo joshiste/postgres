@@ -7004,8 +7004,9 @@ pull_multi_detoast_walker(Node *node, pull_multi_detoast_context *context)
 
 /*
  * pull_raw_reader_attrs
- *		Attribute numbers of Vars with the given varno that expressions in the
- *		list pass directly to a function reading the stored representation.
+ *		Add to attrs the attribute numbers of Vars with the given varno that
+ *		expressions under node pass directly to a function reading the stored
+ *		representation.
  */
 typedef struct
 {
@@ -7036,13 +7037,13 @@ pull_raw_reader_walker(Node *node, pull_raw_reader_context *context)
 }
 
 Bitmapset *
-pull_raw_reader_attrs(List *exprs, Index varno)
+pull_raw_reader_attrs(Node *node, Index varno, Bitmapset *attrs)
 {
 	pull_raw_reader_context context;
 
 	context.varno = varno;
-	context.attrs = NULL;
-	pull_raw_reader_walker((Node *) exprs, &context);
+	context.attrs = attrs;
+	pull_raw_reader_walker(node, &context);
 	return context.attrs;
 }
 
