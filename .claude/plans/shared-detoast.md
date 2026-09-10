@@ -138,6 +138,8 @@ all fixed in one commit with tests:
 - 2026-09-10: the macOS temp cleaner had removed parts of the scratchpad build after
   four idle days; rebuilt from scratch, branch tip re-verified (module, guard, regress).
   Series regenerated: 864 / 508 / 747 / 20 lines added per commit.
+- 2026-09-10, VM: tip c39abcd666 on the cassert build: guard 30/30, module pass,
+  check-world clean. All review follow-ups closed.
 - Item 12: /code-review at low effort completed on the split series and found two
   gaps of the ancestor-raw-reader family (join sets under permission, nestloop
   parameters under permission); fixed in apply_raw_reader_vetoes with two module
