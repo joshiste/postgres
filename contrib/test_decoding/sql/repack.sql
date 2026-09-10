@@ -42,6 +42,11 @@ REPACK (CONCURRENTLY) clstrpart;
 -- Disallowed in catalogs
 REPACK (CONCURRENTLY) pg_class;
 
+-- Doesn't support tables used as catalog tables
+CREATE TABLE repack_conc_user_catalog (i int) WITH (user_catalog_table = true);
+REPACK (CONCURRENTLY) repack_conc_user_catalog;
+DROP TABLE repack_conc_user_catalog;
+
 -- Doesn't support TOAST tables directly
 CREATE TABLE repack_conc_toast (t text);
 SELECT reltoastrelid::regclass AS toast_rel
@@ -58,6 +63,11 @@ DROP TABLE repack_conc_temp;
 CREATE UNLOGGED TABLE repack_conc_unlogged (i int PRIMARY KEY);
 REPACK (CONCURRENTLY) repack_conc_unlogged;
 DROP TABLE repack_conc_unlogged;
+
+-- Doesn't support materialized views
+CREATE MATERIALIZED VIEW repack_conc_matview AS SELECT 1 AS i;
+REPACK (CONCURRENTLY) repack_conc_matview;
+DROP MATERIALIZED VIEW repack_conc_matview;
 
 -- Doesn't support tables with REPLICA IDENTITY NOTHING, even if they have a primary key
 CREATE TABLE repack_conc_replident (i int PRIMARY KEY);
