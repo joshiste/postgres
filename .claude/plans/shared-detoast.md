@@ -132,6 +132,9 @@ all fixed in one commit with tests:
   and +2,489 (4% of its planning) on the two-reference jsonb statement, paid once per
   plan; numbers in the baseline file, with a possible follow-up (skip get_attstorage
   when the type decides).
+- 2026-09-10, follow-up done: one type fetch instead of two lookups, raw-reader pass
+  gated on PlannerGlobal.hasPredetoastAttrs, no list copies in the pass. Fifth commit
+  of the series; remeasured on the VM (see baseline).
 - Item 4 (2026-09-10): short-header widening loses 1.9% on the two-reference inline
   statement and wins 1.4% on the 20-reference one; not adopted, branch deleted. A
   plan-time reference-count threshold would be the way to revisit.
