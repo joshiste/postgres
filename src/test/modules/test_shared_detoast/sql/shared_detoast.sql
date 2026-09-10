@@ -93,12 +93,19 @@ RESET enable_hashjoin; RESET enable_nestloop;
 SET enable_nestloop = off; SET enable_mergejoin = off;
 SELECT count(*) FROM sd p JOIN sd2 q ON p.doc = q.doc WHERE p.doc ? 'a' AND p.doc @> '{"b": 2}';
 RESET enable_nestloop; RESET enable_mergejoin;
+-- an ancestor reading a column the join projects bare still sees the stored
+-- form, even though the join itself detoasts that column for its expressions
+SELECT pg_column_toast_chunk_id(d) IS NOT NULL AS pointer_kept, x
+FROM (SELECT p.doc AS d, (p.doc->>'a')::int + (p.doc->>'b')::int + (q.doc->>'a')::int AS x
+      FROM sd p JOIN sd2 q ON p.id = q.id OFFSET 0) s;
 -- an outer column passed down as a nestloop parameter keeps its pointer too,
--- since the inner side (Memoize) may keep the parameter as a cache key
+-- since the inner side (Memoize) may keep the parameter as a cache key; both
+-- with a parent that stores rows and with one that consumes them
 CREATE INDEX sd2_doc_hash ON sd2 USING hash (doc);
 SET enable_hashjoin = off; SET enable_mergejoin = off; SET enable_seqscan = off;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM sd o JOIN sd2 q ON q.doc = o.doc WHERE o.doc ? 'a' AND o.doc @> '{"b": 2}';
 SELECT count(*) FROM sd o JOIN sd2 q ON q.doc = o.doc WHERE o.doc ? 'a' AND o.doc @> '{"b": 2}';
+SELECT (q.doc->>'a')::int FROM sd o JOIN sd2 q ON q.doc = o.doc WHERE o.doc ? 'a' AND o.doc @> '{"b": 2}';
 RESET enable_hashjoin; RESET enable_mergejoin; RESET enable_seqscan;
 DROP TABLE sd2;
 -- a scan without projection under a parent that copies the physical tuple

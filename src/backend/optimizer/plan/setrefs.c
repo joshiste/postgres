@@ -1050,11 +1050,13 @@ set_child_predetoast_noproj(Plan *parent, Plan *child, Index side)
  *		pre-detoast sets the attributes some ancestor passes to a function
  *		that reads the stored representation.
  *
- * A scan node already excludes such attributes for its own expressions; an
- * ancestor can only see the scan's value through bare Vars, so raw_above
+ * A node already excludes such attributes for its own expressions; an
+ * ancestor can only see a child's value through bare Vars, so raw_above
  * (output attribute numbers of this node that an ancestor reads raw) is
  * mapped through this node's targetlist and joined with the node's own raw
- * reads before it is handed to the children.
+ * reads before it is handed to the children.  Nestloop parameters are
+ * treated the same way.  Both a join's per-side sets and a child scan's sets
+ * are trimmed, since either may include bare-projected attributes.
  */
 static void
 apply_raw_reader_vetoes(Plan *plan, Bitmapset *raw_above)
@@ -1114,6 +1116,34 @@ apply_raw_reader_vetoes(Plan *plan, Bitmapset *raw_above)
 			if (IsA(var, Var) && var->varno == varno && var->varattno > 0 &&
 				bms_is_member(tle->resno, raw_above))
 				raw = bms_add_member(raw, var->varattno);
+		}
+
+		/*
+		 * Outer columns a NestLoop passes down as parameters must keep their
+		 * stored form as well: the inner side may read them raw or keep them.
+		 */
+		if (IsA(plan, NestLoop) && varno == OUTER_VAR)
+			raw = bms_add_members(raw, nestloop_param_attrs((NestLoop *) plan));
+
+		/*
+		 * A join's own per-side sets may hold bare-projected attributes for
+		 * the permission case; take out what an ancestor reads raw.
+		 */
+		if (raw != NULL && (IsA(plan, NestLoop) || IsA(plan, MergeJoin) ||
+							IsA(plan, HashJoin)))
+		{
+			Join	   *join = (Join *) plan;
+
+			if (varno == OUTER_VAR)
+			{
+				join->predetoast_outer_safe = bms_del_members(join->predetoast_outer_safe, raw);
+				join->predetoast_outer_all = bms_del_members(join->predetoast_outer_all, raw);
+			}
+			else
+			{
+				join->predetoast_inner_safe = bms_del_members(join->predetoast_inner_safe, raw);
+				join->predetoast_inner_all = bms_del_members(join->predetoast_inner_all, raw);
+			}
 		}
 
 		if (IsScanPlan(child) && raw != NULL)
