@@ -33,6 +33,14 @@ REPACK (CONCURRENTLY) rpk_missing;
 SELECT * FROM rpk_missing;
 DROP TABLE rpk_missing;
 
+-- Verify handling of !indisready indexes
+CREATE TABLE repack_conc_invidx (i int PRIMARY KEY, j int);
+INSERT INTO repack_conc_invidx VALUES (1, 0), (2, 0);
+CREATE UNIQUE INDEX CONCURRENTLY repack_conc_invidx_uq ON repack_conc_invidx (j);
+CREATE INDEX CONCURRENTLY repack_conc_invalid_expr ON repack_conc_invidx ((1/j));
+REPACK repack_conc_invidx;
+REPACK (CONCURRENTLY) repack_conc_invidx;
+
 -- Error cases for concurrent mode
 
 -- Doesn't like partitioned tables
@@ -81,6 +89,15 @@ REPACK (CONCURRENTLY) repack_conc_replident;
 
 -- Doesn't support tables with deferrable primary keys
 ALTER TABLE repack_conc_replident ADD PRIMARY KEY (i) DEFERRABLE;
+REPACK (CONCURRENTLY) repack_conc_replident;
+
+-- Doesn't support tables whose replica identity indexes were dropped, even
+-- if a workable primary key is present.
+ALTER TABLE repack_conc_replident DROP CONSTRAINT repack_conc_replident_pkey,
+	ADD PRIMARY KEY (i);
+CREATE UNIQUE INDEX replidx ON repack_conc_replident (i);
+ALTER TABLE repack_conc_replident REPLICA IDENTITY USING INDEX replidx;
+DROP INDEX replidx;
 REPACK (CONCURRENTLY) repack_conc_replident;
 
 -- clean up

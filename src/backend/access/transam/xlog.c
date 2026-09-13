@@ -640,6 +640,12 @@ static int	UsableBytesInSegment;
 static XLogwrtResult LogwrtResult = {0, 0};
 
 /*
+ * True if this process has published primary-flush progress that has not yet
+ * been reported to primary-flush waiters.
+ */
+static bool primaryFlushWakeupPending = false;
+
+/*
  * Update local copy of shared XLogCtl->log{Write,Flush}Result
  *
  * It's critical that Flush always trails Write, so the order of the reads is
@@ -651,6 +657,23 @@ static XLogwrtResult LogwrtResult = {0, 0};
 		pg_read_barrier(); \
 		_target.Write = pg_atomic_read_u64(&XLogCtl->logWriteResult); \
 	} while (0)
+
+/*
+ * Process a primary-flush wakeup requested by XLogWrite().  The caller must
+ * not hold WALWriteLock or any WAL insertion lock.
+ */
+static void
+PrimaryFlushWakeupProcessRequests(void)
+{
+	if (unlikely(primaryFlushWakeupPending))
+	{
+		/* Clear the process-local request before satisfying it. */
+		primaryFlushWakeupPending = false;
+
+		/* XLogWrite() published this frontier before setting the request. */
+		WaitLSNWakeup(WAIT_LSN_TYPE_PRIMARY_FLUSH, LogwrtResult.Flush);
+	}
+}
 
 /*
  * openLogFile is -1 or a kernel FD for an open log file segment.
@@ -672,7 +695,6 @@ static TimeLineID openLogTLI = 0;
  * Those values are kept consistent as long as crash recovery runs.
  */
 static XLogRecPtr LocalMinRecoveryPoint;
-static TimeLineID LocalMinRecoveryPointTLI;
 static bool updateMinRecoveryPoint = true;
 
 /*
@@ -1047,6 +1069,9 @@ XLogInsertRecord(XLogRecData *rdata,
 			}
 		}
 	}
+
+	/* Process any flush progress published while making room for the record. */
+	PrimaryFlushWakeupProcessRequests();
 
 #ifdef WAL_DEBUG
 	if (XLOG_DEBUG)
@@ -2335,6 +2360,7 @@ XLogWrite(XLogwrtRqst WriteRqst, TimeLineID tli, bool flexible)
 	bool		ispartialpage;
 	bool		last_iteration;
 	bool		finishing_seg;
+	XLogRecPtr	oldFlush;
 	int			curridx;
 	int			npages;
 	int			startidx;
@@ -2347,6 +2373,7 @@ XLogWrite(XLogwrtRqst WriteRqst, TimeLineID tli, bool flexible)
 	 * Update local LogwrtResult (caller probably did this already, but...)
 	 */
 	RefreshXLogWriteResult(LogwrtResult);
+	oldFlush = LogwrtResult.Flush;
 
 	/*
 	 * Since successive pages in the xlog cache are consecutively allocated,
@@ -2608,6 +2635,10 @@ XLogWrite(XLogwrtRqst WriteRqst, TimeLineID tli, bool flexible)
 	pg_write_barrier();
 	pg_atomic_write_u64(&XLogCtl->logFlushResult, LogwrtResult.Flush);
 
+	/* Defer notification until the caller has released its WAL locks. */
+	if (LogwrtResult.Flush > oldFlush)
+		primaryFlushWakeupPending = true;
+
 #ifdef USE_ASSERT_CHECKING
 	{
 		XLogRecPtr	Flush;
@@ -2752,7 +2783,6 @@ UpdateMinRecoveryPoint(XLogRecPtr lsn, bool force)
 
 	/* update local copy */
 	LocalMinRecoveryPoint = ControlFile->minRecoveryPoint;
-	LocalMinRecoveryPointTLI = ControlFile->minRecoveryPointTLI;
 
 	if (!XLogRecPtrIsValid(LocalMinRecoveryPoint))
 		updateMinRecoveryPoint = false;
@@ -2787,7 +2817,6 @@ UpdateMinRecoveryPoint(XLogRecPtr lsn, bool force)
 			ControlFile->minRecoveryPointTLI = newMinRecoveryPointTLI;
 			UpdateControlFile();
 			LocalMinRecoveryPoint = newMinRecoveryPoint;
-			LocalMinRecoveryPointTLI = newMinRecoveryPointTLI;
 
 			ereport(DEBUG2,
 					errmsg_internal("updated min recovery point to %X/%08X on timeline %u",
@@ -2946,6 +2975,7 @@ XLogFlush(XLogRecPtr record)
 	 * Wake up processes waiting for primary flush LSN to reach current flush
 	 * position.
 	 */
+	primaryFlushWakeupPending = false;
 	WaitLSNWakeup(WAIT_LSN_TYPE_PRIMARY_FLUSH, LogwrtResult.Flush);
 
 	/*
@@ -3134,6 +3164,7 @@ XLogBackgroundFlush(void)
 	 * Wake up processes waiting for primary flush LSN to reach current flush
 	 * position.
 	 */
+	primaryFlushWakeupPending = false;
 	WaitLSNWakeup(WAIT_LSN_TYPE_PRIMARY_FLUSH, LogwrtResult.Flush);
 
 	/*
@@ -3201,7 +3232,6 @@ XLogNeedsFlush(XLogRecPtr record)
 		if (!LWLockConditionalAcquire(ControlFileLock, LW_SHARED))
 			return true;
 		LocalMinRecoveryPoint = ControlFile->minRecoveryPoint;
-		LocalMinRecoveryPointTLI = ControlFile->minRecoveryPointTLI;
 		LWLockRelease(ControlFileLock);
 
 		/*
@@ -6207,12 +6237,10 @@ StartupXLOG(void)
 		if (InArchiveRecovery)
 		{
 			LocalMinRecoveryPoint = ControlFile->minRecoveryPoint;
-			LocalMinRecoveryPointTLI = ControlFile->minRecoveryPointTLI;
 		}
 		else
 		{
 			LocalMinRecoveryPoint = InvalidXLogRecPtr;
-			LocalMinRecoveryPointTLI = 0;
 		}
 
 		/* Check that the GUCs used to generate the WAL allow recovery */
@@ -6749,7 +6777,6 @@ SwitchIntoArchiveRecovery(XLogRecPtr EndRecPtr, TimeLineID replayTLI)
 	}
 	/* update local copy */
 	LocalMinRecoveryPoint = ControlFile->minRecoveryPoint;
-	LocalMinRecoveryPointTLI = ControlFile->minRecoveryPointTLI;
 
 	/*
 	 * The startup process can update its local copy of minRecoveryPoint from
@@ -8316,7 +8343,6 @@ CreateRestartPoint(int flags)
 
 				/* update local copy */
 				LocalMinRecoveryPoint = ControlFile->minRecoveryPoint;
-				LocalMinRecoveryPointTLI = ControlFile->minRecoveryPointTLI;
 			}
 			if (flags & CHECKPOINT_IS_SHUTDOWN)
 				ControlFile->state = DB_SHUTDOWNED_IN_RECOVERY;
@@ -9161,7 +9187,6 @@ xlog_redo(XLogReaderState *record)
 		if (InArchiveRecovery)
 		{
 			LocalMinRecoveryPoint = ControlFile->minRecoveryPoint;
-			LocalMinRecoveryPointTLI = ControlFile->minRecoveryPointTLI;
 		}
 		if (XLogRecPtrIsValid(LocalMinRecoveryPoint) && LocalMinRecoveryPoint < lsn)
 		{
@@ -9307,7 +9332,6 @@ xlog2_redo(XLogReaderState *record)
 		if (InArchiveRecovery)
 		{
 			LocalMinRecoveryPoint = ControlFile->minRecoveryPoint;
-			LocalMinRecoveryPointTLI = ControlFile->minRecoveryPointTLI;
 		}
 		if (XLogRecPtrIsValid(LocalMinRecoveryPoint) && LocalMinRecoveryPoint < lsn)
 		{

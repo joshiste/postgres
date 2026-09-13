@@ -587,6 +587,7 @@ CreateRangeStmt
 CreateReplicationSlotCmd
 CreateRoleStmt
 CreateSchemaStmt
+CreateSchemaStmtContext
 CreateSeqStmt
 CreateStatsStmt
 CreateStmt
@@ -2507,6 +2508,7 @@ RI_CompareKey
 RI_ConstraintInfo
 RI_FastPathEntry
 RI_FastPathKey
+RI_FastPathState
 RI_QueryHashEntry
 RI_QueryKey
 RTEKind
@@ -3002,6 +3004,7 @@ StatsElem
 StatsExtInfo
 StdAnalyzeData
 StdRdOptIndexCleanup
+StdRdOptToastValueType
 StdRdOptions
 Step
 StopList
