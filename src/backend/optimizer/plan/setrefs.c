@@ -15,7 +15,6 @@
  */
 #include "postgres.h"
 
-#include "access/htup_details.h"
 #include "access/transam.h"
 #include "catalog/pg_type.h"
 #include "nodes/makefuncs.h"
@@ -32,6 +31,7 @@
 #include "tcop/utility.h"
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
+#include "utils/typcache.h"
 
 
 typedef enum
@@ -137,7 +137,7 @@ static bool flatten_rtes_walker(Node *node, flatten_rtes_walker_context *cxt);
 static void add_rte_to_flat_rtable(PlannerGlobal *glob, List *rteperminfos,
 								   RangeTblEntry *rte);
 static Plan *set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset);
-static void set_scan_predetoast_attrs(PlannerInfo *root, Scan *scan);
+static void set_scan_predetoast_attrs(PlannerInfo *root, Scan *scan, int rtoffset);
 static void set_join_predetoast_attrs(PlannerInfo *root, Join *join);
 static void set_agg_predetoast_attrs(PlannerInfo *root, Agg *agg);
 static void set_child_predetoast_noproj(Plan *parent, Plan *child, Index side);
@@ -649,22 +649,30 @@ add_rte_to_flat_rtable(PlannerGlobal *glob, List *rteperminfos,
 /*
  * toastable_type
  *		Is this a varlena type whose values may be stored out of line or
- *		compressed?  One syscache fetch for both facts.
+ *		compressed?  The type cache has both facts without a catalog fetch.
  */
 static bool
 toastable_type(Oid typid)
 {
-	HeapTuple	tp;
-	Form_pg_type typtup;
-	bool		result;
+	TypeCacheEntry *typentry = lookup_type_cache(typid, 0);
 
-	tp = SearchSysCache1(TYPEOID, ObjectIdGetDatum(typid));
-	if (!HeapTupleIsValid(tp))
-		elog(ERROR, "cache lookup failed for type %u", typid);
-	typtup = (Form_pg_type) GETSTRUCT(tp);
-	result = typtup->typlen == -1 && typtup->typstorage != TYPSTORAGE_PLAIN;
-	ReleaseSysCache(tp);
-	return result;
+	return typentry->typlen == -1 && typentry->typstorage != TYPSTORAGE_PLAIN;
+}
+
+/*
+ * scan_relation_natts
+ *		Number of attributes of the relation a scan reads.  The planner's own
+ *		RelOptInfo knows it; fall back to the catalog when the scan's range
+ *		table index has none (rtoffset undoes set_plan_refs' renumbering).
+ */
+static int
+scan_relation_natts(PlannerInfo *root, Scan *scan, int rtoffset, Oid relid)
+{
+	Index		rti = scan->scanrelid - rtoffset;
+
+	if (rti < root->simple_rel_array_size && root->simple_rel_array[rti] != NULL)
+		return root->simple_rel_array[rti]->max_attr;
+	return get_relnatts(relid);
 }
 
 /*
@@ -677,7 +685,7 @@ toastable_type(Oid typid)
  * chain never stores a tuple, so they go into predetoast_attrs_all only.
  */
 static void
-set_scan_predetoast_attrs(PlannerInfo *root, Scan *scan)
+set_scan_predetoast_attrs(PlannerInfo *root, Scan *scan, int rtoffset)
 {
 	Plan	   *plan = &scan->plan;
 	List	   *vars;
@@ -742,7 +750,7 @@ set_scan_predetoast_attrs(PlannerInfo *root, Scan *scan)
 	 * matches its own projection decision before using the set.
 	 */
 	if (OidIsValid(relid) &&
-		list_length(plan->targetlist) == get_relnatts(relid) &&
+		list_length(plan->targetlist) == scan_relation_natts(root, scan, rtoffset, relid) &&
 		bms_num_members(bare) == list_length(plan->targetlist))
 	{
 		scan->predetoast_noproj = true;
@@ -1914,7 +1922,7 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 	 * once per row without walking the expressions again at every start.
 	 */
 	if (IsScanPlan(plan))
-		set_scan_predetoast_attrs(root, (Scan *) plan);
+		set_scan_predetoast_attrs(root, (Scan *) plan, rtoffset);
 
 	/*
 	 * Now recurse into child plans, if any
@@ -2057,7 +2065,7 @@ set_subqueryscan_references(PlannerInfo *root,
 		plan->scan.plan.qual =
 			fix_scan_list(root, plan->scan.plan.qual,
 						  rtoffset, NUM_EXEC_QUAL((Plan *) plan));
-		set_scan_predetoast_attrs(root, &plan->scan);
+		set_scan_predetoast_attrs(root, &plan->scan, rtoffset);
 
 		result = (Plan *) plan;
 	}
