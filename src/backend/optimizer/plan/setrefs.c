@@ -32,6 +32,7 @@
 #include "tcop/utility.h"
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
+#include "utils/typcache.h"
 
 
 typedef enum
@@ -137,9 +138,9 @@ static bool flatten_rtes_walker(Node *node, flatten_rtes_walker_context *cxt);
 static void add_rte_to_flat_rtable(PlannerGlobal *glob, List *rteperminfos,
 								   RangeTblEntry *rte);
 static Plan *set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset);
-static void set_scan_predetoast_attrs(PlannerInfo *root, Scan *scan);
-static void set_join_predetoast_attrs(Join *join);
-static void set_agg_predetoast_attrs(Agg *agg);
+static void set_scan_predetoast_attrs(PlannerInfo *root, Scan *scan, int rtoffset);
+static void set_join_predetoast_attrs(PlannerInfo *root, Join *join);
+static void set_agg_predetoast_attrs(PlannerInfo *root, Agg *agg);
 static void set_child_predetoast_noproj(Plan *parent, Plan *child, Index side);
 static void apply_raw_reader_vetoes(Plan *plan, Bitmapset *raw_above);
 static Plan *set_indexonlyscan_references(PlannerInfo *root,
@@ -364,9 +365,11 @@ set_plan_references(PlannerInfo *root, Plan *plan)
 
 	/*
 	 * Now that every node knows what it may detoast in place, take back what
-	 * an ancestor still needs in stored form.
+	 * an ancestor still needs in stored form.  Nothing to do for the common
+	 * plan without any such attribute.
 	 */
-	apply_raw_reader_vetoes(result, NULL);
+	if (root->glob->hasPredetoastAttrs)
+		apply_raw_reader_vetoes(result, NULL);
 
 	/*
 	 * If we have AlternativeSubPlans, it is likely that we now have some
@@ -645,6 +648,35 @@ add_rte_to_flat_rtable(PlannerGlobal *glob, List *rteperminfos,
 }
 
 /*
+ * toastable_type
+ *		Is this a varlena type whose values may be stored out of line or
+ *		compressed?  The type cache has both facts without a catalog fetch.
+ */
+static bool
+toastable_type(Oid typid)
+{
+	TypeCacheEntry *typentry = lookup_type_cache(typid, 0);
+
+	return typentry->typlen == -1 && typentry->typstorage != TYPSTORAGE_PLAIN;
+}
+
+/*
+ * scan_relation_natts
+ *		Number of attributes of the relation a scan reads.  The planner's own
+ *		RelOptInfo knows it; fall back to the catalog when the scan's range
+ *		table index has none (rtoffset undoes set_plan_refs' renumbering).
+ */
+static int
+scan_relation_natts(PlannerInfo *root, Scan *scan, int rtoffset, Oid relid)
+{
+	Index		rti = scan->scanrelid - rtoffset;
+
+	if (rti < root->simple_rel_array_size && root->simple_rel_array[rti] != NULL)
+		return root->simple_rel_array[rti]->max_attr;
+	return get_relnatts(relid);
+}
+
+/*
  * set_scan_predetoast_attrs
  *		Record which scan-slot attributes the executor may detoast once per
  *		row in place, now that the node's expressions are final.
@@ -654,7 +686,7 @@ add_rte_to_flat_rtable(PlannerGlobal *glob, List *rteperminfos,
  * chain never stores a tuple, so they go into predetoast_attrs_all only.
  */
 static void
-set_scan_predetoast_attrs(PlannerInfo *root, Scan *scan)
+set_scan_predetoast_attrs(PlannerInfo *root, Scan *scan, int rtoffset)
 {
 	Plan	   *plan = &scan->plan;
 	List	   *vars;
@@ -693,15 +725,12 @@ set_scan_predetoast_attrs(PlannerInfo *root, Scan *scan)
 	foreach(lc, vars)
 	{
 		Var		   *var = (Var *) lfirst(lc);
-		char		storage;
 
-		if (get_typlen(var->vartype) != -1)
+		if (!toastable_type(var->vartype))
 			continue;
-		if (OidIsValid(relid) && var->varno != INDEX_VAR)
-			storage = get_attstorage(relid, var->varattno);
-		else
-			storage = get_typstorage(var->vartype);
-		if (storage == TYPSTORAGE_PLAIN)
+		/* a column may have been set to PLAIN storage explicitly */
+		if (OidIsValid(relid) && var->varno != INDEX_VAR &&
+			get_attstorage(relid, var->varattno) == TYPSTORAGE_PLAIN)
 			continue;
 		all = bms_add_member(all, var->varattno);
 	}
@@ -724,7 +753,8 @@ set_scan_predetoast_attrs(PlannerInfo *root, Scan *scan)
 	 * matches its own projection decision before using the set.
 	 */
 	if (OidIsValid(relid) &&
-		list_length(plan->targetlist) == get_relnatts(relid) &&
+		list_length(plan->targetlist) ==
+		scan_relation_natts(root, scan, rtoffset, relid) &&
 		bms_num_members(bare) == list_length(plan->targetlist))
 	{
 		scan->predetoast_noproj = true;
@@ -741,6 +771,7 @@ set_scan_predetoast_attrs(PlannerInfo *root, Scan *scan)
 
 	scan->predetoast_attrs_all = all;
 	scan->predetoast_attrs_safe = safe;
+	root->glob->hasPredetoastAttrs = true;
 }
 
 /*
@@ -756,7 +787,7 @@ set_scan_predetoast_attrs(PlannerInfo *root, Scan *scan)
  * side may keep.
  */
 static void
-set_join_predetoast_attrs(Join *join)
+set_join_predetoast_attrs(PlannerInfo *root, Join *join)
 {
 	Plan	   *plan = &join->plan;
 	List	   *quals = list_concat_copy(join->joinqual, plan->qual);
@@ -791,10 +822,8 @@ set_join_predetoast_attrs(Join *join)
 		{
 			Var		   *var = (Var *) lfirst(lc);
 
-			if (get_typlen(var->vartype) != -1 ||
-				get_typstorage(var->vartype) == TYPSTORAGE_PLAIN)
-				continue;
-			all = bms_add_member(all, var->varattno);
+			if (toastable_type(var->vartype))
+				all = bms_add_member(all, var->varattno);
 		}
 		list_free(vars);
 		if (all == NULL)
@@ -826,6 +855,7 @@ set_join_predetoast_attrs(Join *join)
 			join->predetoast_inner_all = all;
 			join->predetoast_inner_safe = safe;
 		}
+		root->glob->hasPredetoastAttrs = true;
 	}
 	list_free(quals);
 	list_free(keyvars);
@@ -924,7 +954,7 @@ nestloop_param_attrs(NestLoop *nl)
  * left alone.
  */
 static void
-set_agg_predetoast_attrs(Agg *agg)
+set_agg_predetoast_attrs(PlannerInfo *root, Agg *agg)
 {
 	Plan	   *plan = &agg->plan;
 	List	   *vars;
@@ -945,8 +975,7 @@ set_agg_predetoast_attrs(Agg *agg)
 	{
 		Var		   *var = (Var *) lfirst(lc);
 
-		if (get_typlen(var->vartype) == -1 &&
-			get_typstorage(var->vartype) != TYPSTORAGE_PLAIN)
+		if (toastable_type(var->vartype))
 			attrs = bms_add_member(attrs, var->varattno);
 	}
 	list_free(vars);
@@ -959,6 +988,8 @@ set_agg_predetoast_attrs(Agg *agg)
 	agg->predetoast_outer_attrs = bms_difference(attrs, excluded);
 	bms_free(attrs);
 	bms_free(excluded);
+	if (agg->predetoast_outer_attrs != NULL)
+		root->glob->hasPredetoastAttrs = true;
 }
 
 /*
@@ -1062,7 +1093,6 @@ set_child_predetoast_noproj(Plan *parent, Plan *child, Index side)
 static void
 apply_raw_reader_vetoes(Plan *plan, Bitmapset *raw_above)
 {
-	List	   *exprs;
 	ListCell   *lc;
 
 	if (plan == NULL)
@@ -1081,11 +1111,6 @@ apply_raw_reader_vetoes(Plan *plan, Bitmapset *raw_above)
 		default:
 			break;
 	}
-
-	exprs = list_copy(plan->targetlist);
-	exprs = list_concat(exprs, plan->qual);
-	if (IsA(plan, NestLoop) || IsA(plan, MergeJoin) || IsA(plan, HashJoin))
-		exprs = list_concat(exprs, ((Join *) plan)->joinqual);
 
 	for (int side = 0; side < 2; side++)
 	{
@@ -1108,7 +1133,11 @@ apply_raw_reader_vetoes(Plan *plan, Bitmapset *raw_above)
 		if (child == NULL)
 			continue;
 
-		raw = pull_raw_reader_attrs(exprs, varno);
+		raw = pull_raw_reader_attrs((Node *) plan->targetlist, varno, NULL);
+		raw = pull_raw_reader_attrs((Node *) plan->qual, varno, raw);
+		if (IsA(plan, NestLoop) || IsA(plan, MergeJoin) || IsA(plan, HashJoin))
+			raw = pull_raw_reader_attrs((Node *) ((Join *) plan)->joinqual,
+										varno, raw);
 		foreach(lc, plan->targetlist)
 		{
 			TargetEntry *tle = (TargetEntry *) lfirst(lc);
@@ -1172,7 +1201,6 @@ apply_raw_reader_vetoes(Plan *plan, Bitmapset *raw_above)
 		}
 		apply_raw_reader_vetoes(child, raw);
 	}
-	list_free(exprs);
 }
 
 /*
@@ -1532,7 +1560,7 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 				}
 
 				set_upper_references(root, plan, rtoffset);
-				set_agg_predetoast_attrs(agg);
+				set_agg_predetoast_attrs(root, agg);
 			}
 			break;
 		case T_Group:
@@ -1898,7 +1926,7 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 	 * once per row without walking the expressions again at every start.
 	 */
 	if (IsScanPlan(plan))
-		set_scan_predetoast_attrs(root, (Scan *) plan);
+		set_scan_predetoast_attrs(root, (Scan *) plan, rtoffset);
 
 	/*
 	 * Now recurse into child plans, if any
@@ -2041,7 +2069,7 @@ set_subqueryscan_references(PlannerInfo *root,
 		plan->scan.plan.qual =
 			fix_scan_list(root, plan->scan.plan.qual,
 						  rtoffset, NUM_EXEC_QUAL((Plan *) plan));
-		set_scan_predetoast_attrs(root, &plan->scan);
+		set_scan_predetoast_attrs(root, &plan->scan, rtoffset);
 
 		result = (Plan *) plan;
 	}
@@ -3064,7 +3092,7 @@ set_join_references(PlannerInfo *root, Join *join, int rtoffset)
 									(bms_is_empty(join->ojrelids) ? NRM_EQUAL : NRM_SUPERSET),
 									NUM_EXEC_QUAL((Plan *) join));
 
-	set_join_predetoast_attrs(join);
+	set_join_predetoast_attrs(root, join);
 
 	pfree(outer_itlist);
 	pfree(inner_itlist);
