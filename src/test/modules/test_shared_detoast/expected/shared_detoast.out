@@ -182,8 +182,25 @@ SELECT pg_column_toast_chunk_id(doc) = (SELECT chunk FROM before) AS pointer_kep
  t
 (1 row)
 
--- (parallel workers are covered elsewhere: injection points attached locally are
--- not seen by worker processes)
+-- parallel workers detoast once as well; locally attached injection points are
+-- not seen by worker processes, so compare buffer counts instead: the second
+-- reference must not fetch any further toast blocks
+CREATE FUNCTION shared_blocks(q text) RETURNS bigint LANGUAGE plpgsql AS $$
+DECLARE j jsonb;
+BEGIN
+    EXECUTE q;                                  -- warm the cache
+    EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON) ' || q INTO j;
+    RETURN (j->0->'Plan'->>'Shared Hit Blocks')::bigint + (j->0->'Plan'->>'Shared Read Blocks')::bigint;
+END $$;
+SET debug_parallel_query = on;
+SELECT shared_blocks($$SELECT doc->'a', doc->'b' FROM sd$$) - shared_blocks($$SELECT doc->'a' FROM sd$$) AS extra_blocks_for_second_reference;
+ extra_blocks_for_second_reference 
+-----------------------------------
+                                 0
+(1 row)
+
+RESET debug_parallel_query;
+DROP FUNCTION shared_blocks(text);
 -- joins: the expressions are evaluated at the join, the value lives in the
 -- child's slot; hash join (probe side), nested loop (both sides) and the outer
 -- side of a merge join detoast once, the inner side of a merge join is left alone
@@ -427,6 +444,39 @@ NOTICE:  notice triggered for injection point detoast-attr-external
      1
 (1 row)
 
+-- a holdable cursor is persisted through a receiver that detoasts anyway: the
+-- scan still detoasts once while the cursor is materialized at COMMIT
+BEGIN;
+DECLARE hc CURSOR WITH HOLD FOR SELECT doc->'a', doc->'b' FROM sd;
+COMMIT;
+NOTICE:  notice triggered for injection point detoast-attr-external
+FETCH ALL FROM hc;
+ ?column? | ?column? 
+----------+----------
+ 1        | 2
+(1 row)
+
+CLOSE hc;
+-- a PL/pgSQL FOR loop fetches through SPI: one detoast per row
+DO $$
+DECLARE r record;
+BEGIN
+    FOR r IN SELECT doc->'a' AS a, doc->'b' AS b FROM sd LOOP
+        RAISE NOTICE 'row: % %', r.a, r.b;
+    END LOOP;
+END $$;
+NOTICE:  notice triggered for injection point detoast-attr-external
+NOTICE:  row: 1 2
+-- with JIT forced on (a no-op on builds without LLVM) the count is the same
+SET jit = on; SET jit_above_cost = 0; SET jit_inline_above_cost = 0; SET jit_optimize_above_cost = 0;
+SELECT doc->'a', doc->'b' FROM sd;
+NOTICE:  notice triggered for injection point detoast-attr-external
+ ?column? | ?column? 
+----------+----------
+ 1        | 2
+(1 row)
+
+RESET jit; RESET jit_above_cost; RESET jit_inline_above_cost; RESET jit_optimize_above_cost;
 -- an inline column never detoasts
 SELECT small->'a', small->'b' FROM sd;
  ?column? | ?column? 

@@ -21,9 +21,9 @@
 -- that hash aggregation stores only the grouping column. Case 23: one detoast
 -- saves 133 heap + 3 toast index blocks in the EXPLAIN buffer counts.
 --
--- Not covered here, deferred to the injection-point test module: holdable
--- cursors (need transaction control), Memoize (needs a repeating outer side),
--- and any JIT case on a build without --with-llvm. Case 23 measures workers via
+-- The injection-point test module (src/test/modules/test_shared_detoast) now also
+-- covers holdable cursors, PL/pgSQL loops, forced JIT, nestloop parameters and the
+-- parallel case (by buffer counts); this suite remains the block-count reference. Case 23 measures workers via
 -- shared_blks only (leader-local toast counters do not see worker fetches); case 27
 -- uses the compressed column, where one detoast costs 10 toast blocks.
 
