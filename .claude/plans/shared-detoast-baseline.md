@@ -144,3 +144,17 @@ Widening a short-header value once into the slot context costs more than two pla
 short-header copies (out-of-line call, context creation and per-row reset) and only
 pays off with many references per row. Not adopted; a reference-count threshold at
 plan time would be the way to revisit it. The experiment branch is deleted.
+
+## Final series tip 73b2f6fb1a on upstream 0c5d626961 (2026-09-15, eddie-debian)
+
+Planning cost after the fifth commit (plan_cache_mode forced; instr/iter, 100000):
+
+| workload   | generic base | generic tip | custom base | custom tip | planning delta |
+|------------|-------------:|------------:|------------:|-----------:|---------------:|
+| loop_noop  |       24,137 |      24,182 |      68,999 |     69,316 |  +272 (was +547) |
+| loop_jsonb |       32,352 |      32,612 |      93,698 |     96,057 | +2,099 (was +2,489) |
+
+Remaining cost for a statement with a candidate: the column-storage catalog lookup,
+the reference walk with its list and bitmap allocations, and the raw-reader pass.
+Paid once per plan, only where the feature applies. Cassert build: guard 30/30,
+module pass, check-world clean.

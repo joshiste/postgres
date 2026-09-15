@@ -152,8 +152,9 @@ all fixed in one commit with tests:
 
 - 2026-09-13: series (5 commits) rebased onto upstream master 0c5d626961 (29 more
   commits, only typedefs.list overlapped, no conflicts). Rebased tree: module, guard
-  30/30, regression 240/240, postgres_fdw clean on the Mac; VM cassert check-world
-  queued. detoast-plan2 merged upstream master, tree taken from the series.
+  30/30, regression 240/240, postgres_fdw clean on the Mac; VM cassert: guard,
+  module and check-world clean (2026-09-15). detoast-plan2 merged upstream master,
+  tree taken from the series.
 - 2026-09-10: series rebased from 534db08f97 onto upstream master 8db08e2522 (60
   commits), no conflicts; upstream had itself revived get_relnatts and reworked
   join.out. Rebased tree: module, guard 30/30, regression (now 240 tests) and
