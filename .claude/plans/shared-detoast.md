@@ -165,6 +165,18 @@ all fixed in one commit with tests:
 - Xcode update on the Mac blocked compiles until the licence was accepted; the temp
   cleaner purged the scratchpad build a second time, hence the ~/pg-build location.
 
+- /code-review at low effort on the five-commit series (2026-09-16) found one gap:
+  the "projected bare" checks recognised only a Var at the root of a targetlist
+  entry, while the executor compiles a Var under RelabelType, a CASE result,
+  COALESCE, GREATEST/LEAST or NULLIF to the same step. Reproduced: a CASE arm
+  returning doc whole under OFFSET 0 lost the pointer for an ancestor
+  pg_column_toast_chunk_id(), and the same shapes under a Sort stored the fat value.
+  Fixed with pull_passthrough_attrs() at all five sites (scan and join bare sets,
+  bare_vars_of_side, aggregate kept args, raw-reader mapping in
+  apply_raw_reader_vetoes), folded into series commits 1 to 3 (71def8ecf0 on
+  detoast-plan2, series tip e28df084a4). Three module cases; Mac module, guard,
+  regression 240/240 and postgres_fdw clean.
+
 ### Shapes excluded by design, and why
 
 Each of these keeps the default: the scan below still shares within its own
