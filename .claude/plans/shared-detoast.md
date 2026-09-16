@@ -226,6 +226,12 @@ boundary named.
 
 ## Rebase log
 
+- 2026-09-16: series (5 commits) rebased onto upstream master a4f18fd8f2 (50 more
+  commits; upstream touched execnodes.h, executor.h, plannodes.h, pathnodes.h,
+  lsyscache.h, join.out and typedefs.list, no conflicts). Rebased tree e35d0351e7:
+  Mac module, guard 30/30, regression 239/239 (upstream dropped a test), postgres_fdw
+  clean; VM cassert: module and guard clean, check-world running. detoast-plan2
+  merged upstream master, tree identical to the series.
 - 2026-09-13: series (5 commits) rebased onto upstream master 0c5d626961 (29 more
   commits, only typedefs.list overlapped, no conflicts). Rebased tree: module, guard
   30/30, regression 240/240, postgres_fdw clean on the Mac; VM cassert: guard,
