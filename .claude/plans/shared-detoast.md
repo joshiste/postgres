@@ -148,6 +148,69 @@ all fixed in one commit with tests:
   parameters under permission); fixed in apply_raw_reader_vetoes with two module
   cases. The earlier high/medium runs had hit the session rate limit.
 
+## Closing batch (2026-09-15)
+
+- Guard-only shapes moved into the in-tree module: holdable cursor (one detoast at
+  COMMIT while the cursor is persisted), PL/pgSQL FOR loop through SPI, forced JIT
+  settings, and the parallel case, which compares EXPLAIN (BUFFERS) block counts of
+  the two-reference and one-reference statements because workers do not see locally
+  attached injection points (0 extra blocks). 67 notices pinned. Series test commit
+  regenerated; the tree equals detoast-plan2. Mac (new persistent build under
+  ~/pg-build): module, guard 30/30, regression 240/240. VM cassert: module, guard,
+  check-world clean.
+- Measurement scripts (perfbench.sh, profile2.sh, build.sh) and the 2024 v10 patch are
+  in .claude/harness/vm and .claude/harness/prior-art (622487e189); the VM keeps only
+  the B2 debug/jit/perf builds and the base perf build (3.5 GB).
+- The intermittent VM name resolution failure was the user's VPN, not the box.
+- Xcode update on the Mac blocked compiles until the licence was accepted; the temp
+  cleaner purged the scratchpad build a second time, hence the ~/pg-build location.
+
+### Shapes excluded by design, and why
+
+Each of these keeps the default: the scan below still shares within its own
+expressions (the "safe" set), and what is lost is only the sharing across the node
+boundary named.
+
+- MergeJoin inner side (join->predetoast_inner_* stay empty, set_join_predetoast_attrs
+  and set_child_predetoast_noproj). The node saves the current inner tuple with
+  ExecCopySlot into mj_MarkedTupleSlot and later evaluates merge clauses and join
+  quals against that copy instead of the child slot. Whether the copy carries the
+  detoasted value or the original pointer depends on the child slot's ops (physical
+  copy from the tuple vs copy of tts_values), so the same Var would sometimes read a
+  fat value living in another slot's detoast context. Either the copy step or the
+  marked slot would need its own reset discipline; not worth it for the inner side of
+  a merge join, whose inputs are usually sorted index scans.
+- WindowAgg inputs. The node buffers its input in a tuplestore and evaluates window
+  function arguments, partition and order expressions on rows read back from it into
+  several slots (agg_row_slot, temp slots, frame head/tail slots). A "Pre-detoast
+  Outer" set like Agg's would have to be honoured on each of those slots with a reset
+  whenever the tuplestore position moves, and a child projecting the column bare into
+  the store would put the fat value into the tuplestore if the child slot is virtual.
+  WindowAgg is treated as a storing parent (noproj widening allowed below it, since
+  storing copies physically from heap slots), but it gets no set of its own.
+- Grouping sets and mixed aggregation (agg->groupingSets, chain, AGG_MIXED). One Agg
+  then runs several phases with different grouping column sets, and the hashed
+  phases copy input columns into hash table entries from the input slot's values.
+  agg_kept_input_attrs would need the union over all phases and sets, and the
+  sort-based phases re-read the input from a tuplesort. The Agg set is skipped and
+  the noproj widening for a scan directly below such an Agg is denied.
+- Pass-through chains below storing parents (Limit, LockRows, Append, MergeAppend,
+  Result without projection). These return the child's slot unchanged, so a Sort or
+  Hash above them copies the scan slot. The plan-time noproj rule looks one level
+  only: the scan's parent is the pass-through node, which is an "unknown parent",
+  so the widening is not applied. The executor permission bit does travel through
+  them (EXEC_PASS_ROW_CONSUMER), but only from the top-level grant; a storing parent
+  clears it, and a single bit cannot carry per-attribute exclusions. Recursing through
+  Limit/LockRows at plan time is a possible follow-up; Append and MergeAppend would
+  need per-child handling because their children have different attribute numbers.
+- Virtual-slot scans without projection (IndexOnlyScan, ValuesScan, SubqueryScan,
+  CustomScan; ForeignScan with scanrelid 0 goes the same way via tlist_matches_tupdesc
+  with INDEX_VAR). The noproj widening relies on the parent copying from the heap
+  tuple, which keeps the toast pointer; these scans' slots are virtual, or of a type
+  chosen by the subquery or the provider, so a storing parent would copy tts_values
+  and store the detoasted value. With a projection the scan writes its own result
+  slot and the normal safe set applies.
+
 ## Rebase log
 
 - 2026-09-13: series (5 commits) rebased onto upstream master 0c5d626961 (29 more
