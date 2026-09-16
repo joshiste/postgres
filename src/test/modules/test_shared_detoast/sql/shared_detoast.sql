@@ -71,7 +71,8 @@ UPDATE sd SET small = small WHERE doc ? 'a' AND doc @> '{"b": 2}';
 SELECT pg_column_toast_chunk_id(doc) = (SELECT chunk FROM before) AS pointer_kept FROM sd;
 -- parallel workers detoast once as well; locally attached injection points are
 -- not seen by worker processes, so compare buffer counts instead: the second
--- reference must not fetch any further toast blocks
+-- reference must not fetch the document's toast chunks again (dozens of
+-- blocks; a fresh worker's catalog reads make the counts vary by a few)
 CREATE FUNCTION shared_blocks(q text) RETURNS bigint LANGUAGE plpgsql AS $$
 DECLARE j jsonb;
 BEGIN
@@ -80,7 +81,7 @@ BEGIN
     RETURN (j->0->'Plan'->>'Shared Hit Blocks')::bigint + (j->0->'Plan'->>'Shared Read Blocks')::bigint;
 END $$;
 SET debug_parallel_query = on;
-SELECT shared_blocks($$SELECT doc->'a', doc->'b' FROM sd$$) - shared_blocks($$SELECT doc->'a' FROM sd$$) AS extra_blocks_for_second_reference;
+SELECT abs(shared_blocks($$SELECT doc->'a', doc->'b' FROM sd$$) - shared_blocks($$SELECT doc->'a' FROM sd$$)) < 10 AS no_extra_toast_fetches;
 RESET debug_parallel_query;
 DROP FUNCTION shared_blocks(text);
 -- joins: the expressions are evaluated at the join, the value lives in the
