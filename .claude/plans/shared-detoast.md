@@ -232,6 +232,13 @@ boundary named.
   Mac module, guard 30/30, regression 239/239 (upstream dropped a test), postgres_fdw
   clean; VM cassert: module, guard and check-world clean. detoast-plan2
   merged upstream master, tree identical to the series.
+- 2026-09-16, after the rebase: comment audit against the surrounding files (helper
+  header form in execScan.c, one-line flag comments in executor.h, periods, one double
+  blank); folded into the series. The parallel module case then failed once on the VM
+  by -3 blocks (a fresh worker's catalog reads land in the shared block counts); it now
+  checks abs(difference) < 10, where a missed sharing would add dozens of toast-chunk
+  blocks. Series tip b075a91907: VM cassert check-world clean, module 5/5 reruns clean,
+  Mac module clean.
 - 2026-09-13: series (5 commits) rebased onto upstream master 0c5d626961 (29 more
   commits, only typedefs.list overlapped, no conflicts). Rebased tree: module, guard
   30/30, regression 240/240, postgres_fdw clean on the Mac; VM cassert: guard,
