@@ -738,8 +738,7 @@ set_scan_predetoast_attrs(PlannerInfo *root, Scan *scan, int rtoffset)
 	{
 		TargetEntry *tle = (TargetEntry *) lfirst(lc);
 
-		if (IsA(tle->expr, Var) && ((Var *) tle->expr)->varattno > 0)
-			bare = bms_add_member(bare, ((Var *) tle->expr)->varattno);
+		bare = pull_passthrough_attrs((Node *) tle->expr, 0, bare);
 	}
 
 	/*
@@ -833,9 +832,7 @@ set_join_predetoast_attrs(PlannerInfo *root, Join *join)
 		{
 			TargetEntry *tle = (TargetEntry *) lfirst(lc);
 
-			if (IsA(tle->expr, Var) && ((Var *) tle->expr)->varno == sides[side] &&
-				((Var *) tle->expr)->varattno > 0)
-				bare = bms_add_member(bare, ((Var *) tle->expr)->varattno);
+			bare = pull_passthrough_attrs((Node *) tle->expr, sides[side], bare);
 		}
 		safe = bms_difference(all, bare);
 		bms_free(bare);
@@ -869,10 +866,8 @@ bare_vars_of_side(List *targetlist, Index varno)
 	foreach(lc, targetlist)
 	{
 		TargetEntry *tle = (TargetEntry *) lfirst(lc);
-		Var		   *var = (Var *) tle->expr;
 
-		if (IsA(var, Var) && var->varno == varno && var->varattno > 0)
-			result = bms_add_member(result, var->varattno);
+		result = pull_passthrough_attrs((Node *) tle->expr, varno, result);
 	}
 	return result;
 }
@@ -911,11 +906,7 @@ agg_kept_input_attrs(Agg *agg)
 		{
 			Node	   *arg = (Node *) ((TargetEntry *) lfirst(alc))->expr;
 
-			while (IsA(arg, RelabelType))
-				arg = (Node *) ((RelabelType *) arg)->arg;
-			if (IsA(arg, Var) && ((Var *) arg)->varno == OUTER_VAR &&
-				((Var *) arg)->varattno > 0)
-				result = bms_add_member(result, ((Var *) arg)->varattno);
+			result = pull_passthrough_attrs(arg, OUTER_VAR, result);
 		}
 	}
 	list_free(aggrefs);
@@ -1139,11 +1130,9 @@ apply_raw_reader_vetoes(Plan *plan, Bitmapset *raw_above)
 		foreach(lc, plan->targetlist)
 		{
 			TargetEntry *tle = (TargetEntry *) lfirst(lc);
-			Var		   *var = (Var *) tle->expr;
 
-			if (IsA(var, Var) && var->varno == varno && var->varattno > 0 &&
-				bms_is_member(tle->resno, raw_above))
-				raw = bms_add_member(raw, var->varattno);
+			if (bms_is_member(tle->resno, raw_above))
+				raw = pull_passthrough_attrs((Node *) tle->expr, varno, raw);
 		}
 
 		/*
@@ -1186,11 +1175,9 @@ apply_raw_reader_vetoes(Plan *plan, Bitmapset *raw_above)
 			foreach(lc, child->targetlist)
 			{
 				TargetEntry *tle = (TargetEntry *) lfirst(lc);
-				Var		   *var = (Var *) tle->expr;
 
-				if (IsA(var, Var) && var->varattno > 0 &&
-					bms_is_member(tle->resno, raw))
-					attrs = bms_add_member(attrs, var->varattno);
+				if (bms_is_member(tle->resno, raw))
+					attrs = pull_passthrough_attrs((Node *) tle->expr, 0, attrs);
 			}
 			scan->predetoast_attrs_safe = bms_del_members(scan->predetoast_attrs_safe, attrs);
 			scan->predetoast_attrs_all = bms_del_members(scan->predetoast_attrs_all, attrs);

@@ -7048,6 +7048,76 @@ pull_raw_reader_attrs(Node *node, Index varno, Bitmapset *attrs)
 }
 
 /*
+ * pull_passthrough_attrs
+ *		Add to attrs the attribute numbers of Vars with the given varno that
+ *		expr can return whole, without detoasting them.
+ *
+ * A Var at the root of a targetlist expression passes its datum along
+ * unchanged, and so does one below nodes that merely relabel or select
+ * among their inputs: RelabelType, CoerceToDomain, CASE results, COALESCE,
+ * GREATEST/LEAST and the first argument of NULLIF.  The executor compiles
+ * such a Var to the same step as a bare one, so a detoasted value would be
+ * projected in place of the stored pointer; callers exclude these
+ * attributes wherever a bare Var is excluded.
+ */
+Bitmapset *
+pull_passthrough_attrs(Node *expr, Index varno, Bitmapset *attrs)
+{
+	for (;;)
+	{
+		if (expr == NULL)
+			return attrs;
+		switch (nodeTag(expr))
+		{
+			case T_Var:
+				{
+					Var		   *var = (Var *) expr;
+
+					if (var->varattno > 0 &&
+						(varno == 0 || var->varno == varno))
+						attrs = bms_add_member(attrs, var->varattno);
+					return attrs;
+				}
+			case T_RelabelType:
+				expr = (Node *) ((RelabelType *) expr)->arg;
+				break;
+			case T_CoerceToDomain:
+				expr = (Node *) ((CoerceToDomain *) expr)->arg;
+				break;
+			case T_CaseExpr:
+				{
+					CaseExpr   *caseexpr = (CaseExpr *) expr;
+					ListCell   *lc;
+
+					foreach(lc, caseexpr->args)
+						attrs = pull_passthrough_attrs((Node *) ((CaseWhen *) lfirst(lc))->result,
+													   varno, attrs);
+					expr = (Node *) caseexpr->defresult;
+					break;
+				}
+			case T_CoalesceExpr:
+			case T_MinMaxExpr:
+				{
+					List	   *args = IsA(expr, CoalesceExpr) ?
+						((CoalesceExpr *) expr)->args :
+						((MinMaxExpr *) expr)->args;
+					ListCell   *lc;
+
+					foreach(lc, args)
+						attrs = pull_passthrough_attrs((Node *) lfirst(lc),
+													   varno, attrs);
+					return attrs;
+				}
+			case T_NullIfExpr:
+				expr = (Node *) linitial(((NullIfExpr *) expr)->args);
+				break;
+			default:
+				return attrs;
+		}
+	}
+}
+
+/*
  * pull_multi_detoast_vars
  *		Find scan-slot Vars that at least two expressions in a plan node's
  *		targetlist and qual would detoast.

@@ -147,6 +147,17 @@ SELECT pg_column_toast_chunk_id(d) IS NOT NULL AS pointer_kept, a, b FROM sd_row
 DROP FUNCTION sd_rows();
 -- an aggregate that keeps its argument leaves the scan below it alone too
 SELECT count(DISTINCT doc) FROM sd WHERE doc ? 'a' AND doc @> '{"b": 2}';
+-- a column handed on whole through RelabelType, CASE, COALESCE, GREATEST or
+-- NULLIF is projected bare like a plain Var: an ancestor raw reader still sees
+-- the pointer (two detoasts for the two LIKEs, none for the projection)
+SELECT pg_column_toast_chunk_id(t) IS NOT NULL AS pointer_kept
+FROM (SELECT txt COLLATE "C" AS t FROM sd WHERE txt LIKE 'abc%' AND txt LIKE '%a6' OFFSET 0) s;
+SELECT pg_column_toast_chunk_id(d) IS NOT NULL AS pointer_kept
+FROM (SELECT CASE WHEN id > 0 THEN doc END AS d FROM sd WHERE doc ? 'a' AND doc ? 'b' OFFSET 0) s;
+-- and under a Sort the pointer, not the detoasted value, is stored: two
+-- detoasts in the scan, none for the null test outside
+SELECT a, b, d IS NOT NULL AS has_doc
+FROM (SELECT doc->'a' AS a, doc->'b' AS b, COALESCE(doc, '{}') AS d FROM sd ORDER BY small->>'a') s;
 -- a holdable cursor is persisted through a receiver that detoasts anyway: the
 -- scan still detoasts once while the cursor is materialized at COMMIT
 BEGIN;
