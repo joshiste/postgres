@@ -1536,7 +1536,9 @@ postgres=# SELECT '0/0'::pg_lsn + pd.segment_number * ps.setting::int + :offset 
     or understanding of usage results.  <literal>bigint</literal> results
     are measured in bytes.  If an OID that does
     not represent an existing object is passed to one of these
-    functions, <literal>NULL</literal> is returned.
+    functions, <literal>NULL</literal> is returned, except for
+    <function>pg_database_size</function> and
+    <function>pg_tablespace_size</function>, which raise an error.
    </para>
 
    <table id="functions-admin-dbsize">
@@ -1590,7 +1592,7 @@ postgres=# SELECT '0/0'::pg_lsn + pd.segment_number * ps.setting::int + :offset 
          <primary>pg_column_toast_chunk_id</primary>
         </indexterm>
         <function>pg_column_toast_chunk_id</function> ( <type>"any"</type> )
-        <returnvalue>oid</returnvalue>
+        <returnvalue>oid8</returnvalue>
        </para>
        <para>
         Shows the <structfield>chunk_id</structfield> of an on-disk
@@ -1618,7 +1620,8 @@ postgres=# SELECT '0/0'::pg_lsn + pd.segment_number * ps.setting::int + :offset 
         name or OID.  To use this function, you must
         have <literal>CONNECT</literal> privilege on the specified database
         (which is granted by default) or have privileges of
-        the <literal>pg_read_all_stats</literal> role.
+        the <literal>pg_read_all_stats</literal> role.  Throws an error if the
+        database does not exist.
        </para></entry>
       </row>
 
@@ -1751,7 +1754,8 @@ postgres=# SELECT '0/0'::pg_lsn + pd.segment_number * ps.setting::int + :offset 
         specified name or OID. To use this function, you must
         have <literal>CREATE</literal> privilege on the specified tablespace
         or have privileges of the <literal>pg_read_all_stats</literal> role,
-        unless it is the default tablespace for the current database.
+        unless it is the default tablespace for the current database. Throws
+        an error if the tablespace does not exist.
        </para></entry>
       </row>
 
@@ -3128,7 +3132,8 @@ SELECT convert_from(pg_read_binary_file('file_in_utf8.txt'), 'UTF8');
 
    <para>
     The functions shown in <xref linkend="functions-checksums-table" /> can
-    be used to enable or disable data checksums in a running cluster.
+    be used to enable or disable data checksums in a running cluster.  Use of
+    these functions is restricted to superusers.
    </para>
    <para>
     Changing data checksums can be done in a cluster with concurrent activity
@@ -3158,7 +3163,7 @@ SELECT convert_from(pg_read_binary_file('file_in_utf8.txt'), 'UTF8');
         <indexterm>
          <primary>pg_enable_data_checksums</primary>
         </indexterm>
-        <function>pg_enable_data_checksums</function> ( <optional><parameter>cost_delay</parameter> <type>int</type>, <parameter>cost_limit</parameter> <type>int</type></optional> )
+        <function>pg_enable_data_checksums</function> ( <optional><parameter>cost_delay</parameter> <type>int</type> <optional>, <parameter>cost_limit</parameter> <type>int</type></optional></optional> )
         <returnvalue>void</returnvalue>
        </para>
        <para>
@@ -3174,6 +3179,11 @@ SELECT convert_from(pg_read_binary_file('file_in_utf8.txt'), 'UTF8');
         If <parameter>cost_delay</parameter> and <parameter>cost_limit</parameter> are
         specified, the process is throttled using the same principles as
         <link linkend="runtime-config-resource-vacuum-cost">Cost-based Vacuum Delay</link>.
+        <parameter>cost_delay</parameter> defaults to 0,
+        <parameter>cost_limit</parameter> defaults to 100.
+       </para>
+       <para>
+        This function is restricted to superusers.
        </para>
        </entry>
       </row>
@@ -3192,6 +3202,9 @@ SELECT convert_from(pg_read_binary_file('file_in_utf8.txt'), 'UTF8');
         while data checksums are being disabled.  When all active backends have
         stopped validating data checksums, the data checksum state will be
         set to <literal>off</literal>.
+       </para>
+       <para>
+        This function is restricted to superusers.
        </para>
        </entry>
       </row>

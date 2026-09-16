@@ -775,7 +775,7 @@ PrintControlValues(bool guessed)
 	printf(_("Latest checkpoint's NextXID:          %u:%u\n"),
 		   EpochFromFullTransactionId(ControlFile.checkPointCopy.nextXid),
 		   XidFromFullTransactionId(ControlFile.checkPointCopy.nextXid));
-	printf(_("Latest checkpoint's NextOID:          " OID8_FORMAT "\n"),
+	printf(_("Latest checkpoint's NextOID:          %" PRIu64 "\n"),
 		   ControlFile.checkPointCopy.nextOid);
 	printf(_("Latest checkpoint's NextMultiXactId:  %u\n"),
 		   ControlFile.checkPointCopy.nextMulti);
@@ -861,7 +861,7 @@ PrintNewControlValues(void)
 
 	if (next_oid_given)
 	{
-		printf(_("NextOID:                              " OID8_FORMAT "\n"),
+		printf(_("NextOID:                              %" PRIu64 "\n"),
 			   ControlFile.checkPointCopy.nextOid);
 	}
 
@@ -922,6 +922,13 @@ RewriteControlFile(void)
 	ControlFile.backupStartPoint = InvalidXLogRecPtr;
 	ControlFile.backupEndPoint = InvalidXLogRecPtr;
 	ControlFile.backupEndRequired = false;
+
+	/*
+	 * The old WAL is gone and the new position may lie below the old
+	 * watermark, which would make replay ignore future checksum transition
+	 * records.  The state itself is kept.
+	 */
+	ControlFile.data_checksum_lsn = InvalidXLogRecPtr;
 
 	/*
 	 * Force the defaults for max_* settings. The values don't really matter

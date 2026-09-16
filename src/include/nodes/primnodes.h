@@ -1360,11 +1360,11 @@ typedef struct CaseWhen
  *	* Placeholder for intermediate results in some SQL/JSON expression nodes,
  *	  such as JsonConstructorExpr.
  *
- * The uses in CaseExpr and ArrayCoerceExpr are safe only to the extent that
- * there is not any other CaseExpr or ArrayCoerceExpr between the value source
- * node and its child CaseTestExpr(s).  This is true in the parse analysis
- * output, but the planner's function-inlining logic has to be careful not to
- * break it.
+ * The uses in CaseExpr, ArrayCoerceExpr, and JsonConstructorExpr are safe
+ * only to the extent that there is not any other such node between the
+ * value source node and its child CaseTestExpr(s).  This is true in the
+ * parse analysis output, but the planner's constant-folding of simple CASE
+ * and its function-inlining logic have to be careful not to break it.
  *
  * The nested-assignment-expression case is safe because the only node types
  * that can be above such CaseTestExprs are FieldStore and SubscriptingRef.
@@ -2396,39 +2396,5 @@ typedef struct OnConflictExpr
 	int			exclRelIndex;	/* RT index of 'excluded' relation */
 	List	   *exclRelTlist;	/* tlist of the EXCLUDED pseudo relation */
 } OnConflictExpr;
-
-/*----------
- * ForPortionOfExpr - represents a FOR PORTION OF ... expression
- *
- * We set up an expression to make a range from the FROM/TO bounds,
- * so that we can use range operators with it.
- *
- * Then we set up an overlaps expression between that and the range column,
- * so that we can find the rows we need to update/delete.
- *
- * If the user used the FROM ... TO ... syntax, we save the individual
- * expressions so that we can deparse them.
- *
- * In the executor we'll also build an intersect expression between the
- * targeted range and the range column, so that we can update the start/end
- * bounds of the UPDATE'd record.
- *----------
- */
-typedef struct ForPortionOfExpr
-{
-	NodeTag		type;
-	Var		   *rangeVar;		/* Range column */
-	Node	   *targetFrom;		/* FOR PORTION OF FROM bound, if given */
-	Node	   *targetTo;		/* FOR PORTION OF TO bound, if given */
-	Node	   *targetRange;	/* FOR PORTION OF bounds as a range/multirange */
-	Oid			rangeType;		/* (base)type of targetRange */
-	bool		isDomain;		/* Is rangeVar a domain? */
-	Node	   *overlapsExpr;	/* range && targetRange */
-	List	   *rangeTargetList;	/* List of TargetEntrys to set the time
-									 * column(s) */
-	Oid			withoutPortionProc; /* SRF proc for old_range - target_range */
-	ParseLoc	location;		/* token location, or -1 if unknown */
-	ParseLoc	targetLocation; /* token location, or -1 if unknown */
-} ForPortionOfExpr;
 
 #endif							/* PRIMNODES_H */
