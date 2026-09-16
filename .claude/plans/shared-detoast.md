@@ -175,7 +175,8 @@ all fixed in one commit with tests:
   bare_vars_of_side, aggregate kept args, raw-reader mapping in
   apply_raw_reader_vetoes), folded into series commits 1 to 3 (71def8ecf0 on
   detoast-plan2, series tip e28df084a4). Three module cases; Mac module, guard,
-  regression 240/240 and postgres_fdw clean.
+  regression 240/240 and postgres_fdw clean; VM cassert: module, guard,
+  check-world clean on e28df084a4; both regenerated intermediate commits build.
 
 ### Shapes excluded by design, and why
 
