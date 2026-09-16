@@ -1045,7 +1045,7 @@ typedef struct Join
 	/*
 	 * Per input side, the toastable attributes several of this node's
 	 * expressions detoast, as for Scan.predetoast_attrs_safe/_all (see
-	 * set_join_predetoast_attrs)
+	 * set_join_predetoast_attrs).
 	 */
 	Bitmapset  *predetoast_outer_safe;
 	Bitmapset  *predetoast_outer_all;
@@ -1309,7 +1309,7 @@ typedef struct Agg
 	/*
 	 * Input attributes several of the aggregate arguments or quals detoast,
 	 * which the executor may detoast once per input row in the child's slot
-	 * (see set_agg_predetoast_attrs)
+	 * (see set_agg_predetoast_attrs).
 	 */
 	Bitmapset  *predetoast_outer_attrs;
 } Agg;

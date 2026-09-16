@@ -71,10 +71,8 @@
 #define EXEC_FLAG_MARK				0x0010	/* need mark/restore */
 #define EXEC_FLAG_SKIP_TRIGGERS		0x0020	/* skip AfterTrigger setup */
 #define EXEC_FLAG_WITH_NO_DATA		0x0040	/* REFRESH ... WITH NO DATA */
-#define EXEC_FLAG_ROW_CONSUMER		0x0080	/* parent consumes rows one at a
-											 * time */
-#define EXEC_FLAG_GRANT_ROW_CONSUMER 0x0100 /* parent grants ROW_CONSUMER to
-											 * child */
+#define EXEC_FLAG_ROW_CONSUMER		0x0080	/* parent keeps no row copies */
+#define EXEC_FLAG_GRANT_ROW_CONSUMER 0x0100 /* grant ROW_CONSUMER to child */
 
 /*
  * A node whose parent consumes its output one row at a time without ever

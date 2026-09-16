@@ -2556,7 +2556,7 @@ show_qual(List *qual, const char *qlabel,
 }
 
 /*
- * Show which scan-slot attributes a scan node detoasts once per row
+ * Show which scan-slot attributes a scan node detoasts once per row.
  */
 static void
 show_predetoast_attrs(PlanState *planstate, List *ancestors, ExplainState *es)
