@@ -27,6 +27,9 @@ FROM sd;
 
 CREATE EXTENSION injection_points;
 SELECT injection_points_set_local();
+-- the points are attached in this backend only, so nothing may run in a
+-- parallel worker (some CI runs default to debug_parallel_query = regress)
+SET debug_parallel_query = off;
 SELECT injection_points_attach('detoast-attr-external', 'notice');
 SELECT injection_points_attach('detoast-attr-compressed', 'notice');
 
@@ -82,7 +85,7 @@ BEGIN
 END $$;
 SET debug_parallel_query = on;
 SELECT abs(shared_blocks($$SELECT doc->'a', doc->'b' FROM sd$$) - shared_blocks($$SELECT doc->'a' FROM sd$$)) < 10 AS no_extra_toast_fetches;
-RESET debug_parallel_query;
+SET debug_parallel_query = off;
 DROP FUNCTION shared_blocks(text);
 -- joins: the expressions are evaluated at the join, the value lives in the
 -- child's slot; hash join (probe side), nested loop (both sides) and the outer
