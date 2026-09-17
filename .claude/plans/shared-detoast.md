@@ -249,6 +249,19 @@ boundary named.
   parallel case). Verified with both settings on the Mac, also on an -O0 cassert
   autoconf build (the CI build type). Series tip f9ab0a6196, rerun as
   https://github.com/joshiste/postgres/actions/runs/35205549099.
+- 2026-09-17, second CI finding: the Linux Meson 64-bit job (gcc, -fsanitize=address,
+  LLVM 19, -Dbuildtype=debug) crashed inside libLLVM.so.19.1 (SEGV at +0x4850901,
+  deterministic) on the module's forced-JIT statement. Probe branches of unmodified
+  upstream master with only a forced-JIT module (ci-jit-asan-probe, Linux jobs only)
+  crash identically, already with jit_above_cost = 0 alone, so this is an LLVM 19 +
+  AddressSanitizer problem in that job, not the patch. Core regress tests that force
+  jit_above_cost = 0 (aggregates, groupingsets, select_distinct, updatable_views) pass
+  there, so the trigger is statement-specific; a third probe narrows the shape. The
+  module no longer forces JIT; JIT coverage instead comes from running the whole
+  module and the guard suite under forced JIT (temp-config / PGOPTIONS) on the VM's
+  LLVM 14 cassert build, both clean after a distclean rebuild (the incremental
+  build-B2-jit had gone stale and crashed in initdb). Series tip 10c45cd10d:
+  https://github.com/joshiste/postgres/actions/runs/35215567030 fully green.
 - 2026-09-13: series (5 commits) rebased onto upstream master 0c5d626961 (29 more
   commits, only typedefs.list overlapped, no conflicts). Rebased tree: module, guard
   30/30, regression 240/240, postgres_fdw clean on the Mac; VM cassert: guard,
