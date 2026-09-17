@@ -1,5 +1,10 @@
 -- Detoasting a scan column once per row when several expressions reference it.
 --
+-- No statement here forces JIT: sanitizer builds crash inside LLVM on any
+-- forced JIT compilation.  Run the whole file with jit_above_cost = 0 (and
+-- the inline/optimize costs) via PG_TEST_INITDB_EXTRA_OPTS to cover the
+-- JIT-compiled form of the new expression steps.
+--
 -- detoast_attr() runs an injection point whenever it fetches an out-of-line
 -- value or decompresses an inline one, so with the points attached in notice
 -- mode the number of NOTICE lines after a statement is the number of detoasts
@@ -177,10 +182,6 @@ BEGIN
         RAISE NOTICE 'row: % %', r.a, r.b;
     END LOOP;
 END $$;
--- with JIT forced on (a no-op on builds without LLVM) the count is the same
-SET jit = on; SET jit_above_cost = 0; SET jit_inline_above_cost = 0; SET jit_optimize_above_cost = 0;
-SELECT doc->'a', doc->'b' FROM sd;
-RESET jit; RESET jit_above_cost; RESET jit_inline_above_cost; RESET jit_optimize_above_cost;
 -- an inline column never detoasts
 SELECT small->'a', small->'b' FROM sd;
 -- switching the feature off restores one detoast per reference
