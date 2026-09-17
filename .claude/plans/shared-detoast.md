@@ -239,6 +239,16 @@ boundary named.
   checks abs(difference) < 10, where a missed sharing would add dozens of toast-chunk
   blocks. Series tip b075a91907: VM cassert check-world clean, module 5/5 reruns clean,
   Mac module clean.
+- 2026-09-17, first CI run on the fork (GitHub Actions, PG_CI_ENABLED=1; the fork also
+  needed the one-time "enable workflows" click and its master fast-forwarded to
+  upstream so the workflow is registered). All jobs green except macOS - Meson: that
+  job runs with debug_parallel_query=regress, so every statement of the module ran in
+  a worker, which cannot see injection points attached locally, and all 50 notices
+  were missing. Reproduced locally with PG_TEST_INITDB_EXTRA_OPTS; the module now sets
+  debug_parallel_query = off after attaching (and back to off after the explicit
+  parallel case). Verified with both settings on the Mac, also on an -O0 cassert
+  autoconf build (the CI build type). Series tip f9ab0a6196, rerun as
+  https://github.com/joshiste/postgres/actions/runs/35205549099.
 - 2026-09-13: series (5 commits) rebased onto upstream master 0c5d626961 (29 more
   commits, only typedefs.list overlapped, no conflicts). Rebased tree: module, guard
   30/30, regression 240/240, postgres_fdw clean on the Mac; VM cassert: guard,
