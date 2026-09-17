@@ -256,8 +256,10 @@ boundary named.
   crash identically, already with jit_above_cost = 0 alone, so this is an LLVM 19 +
   AddressSanitizer problem in that job, not the patch. Core regress tests that force
   jit_above_cost = 0 (aggregates, groupingsets, select_distinct, updatable_views) pass
-  there, so the trigger is statement-specific; a third probe narrows the shape. The
-  module no longer forces JIT; JIT coverage instead comes from running the whole
+  there, yet the third probe crashed on `SELECT id FROM sd` as the first JIT-compiled
+  statement of a fresh session in a src/test/modules pg_regress run, so the trigger is
+  the environment of that job, not the statement. Worth reporting upstream (the
+  user's call). The module no longer forces JIT; JIT coverage instead comes from running the whole
   module and the guard suite under forced JIT (temp-config / PGOPTIONS) on the VM's
   LLVM 14 cassert build, both clean after a distclean rebuild (the incremental
   build-B2-jit had gone stale and crashed in initdb). Series tip 10c45cd10d:
