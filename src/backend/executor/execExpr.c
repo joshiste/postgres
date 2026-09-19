@@ -111,18 +111,20 @@ static void ExecInitJsonCoercion(ExprState *state, JsonReturning *returning,
 
 /*
  * Prepare evaluation of an argument whose whole value the consuming step
- * reads.  On a node without attributes to detoast once per row, the common
- * case, this is ExecInitExprRec unless the argument may be a parameter;
- * otherwise ExecInitDetoastedVar checks whether the argument is a plain Var
- * of such an attribute or a parameter carrying a column value.
+ * reads.  Only a PARAM_EXEC parameter, or a Var on a node that detoasts
+ * something once per row, can have a copy to hand out; everything else, the
+ * common case, is ExecInitExprRec without further ado.
  */
 static inline void
 ExecInitDetoastArg(Expr *arg, ExprState *state, Datum *resv, bool *resnull)
 {
 	PlanState  *parent = state->parent;
+	Expr	   *expr = arg;
 
-	if (IsA(arg, Param) || IsA(arg, RelabelType) ||
-		(parent != NULL &&
+	while (IsA(expr, RelabelType))
+		expr = ((RelabelType *) expr)->arg;
+	if ((IsA(expr, Param) && ((Param *) expr)->paramkind == PARAM_EXEC) ||
+		(IsA(expr, Var) && parent != NULL &&
 		 (parent->ps_predetoast_scanattrs != NULL ||
 		  parent->ps_predetoast_outerattrs != NULL ||
 		  parent->ps_predetoast_innerattrs != NULL)))
