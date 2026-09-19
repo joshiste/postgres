@@ -276,3 +276,25 @@ the one palloc0 of the side array for the detoasted row; against the ~29,000
 instructions one 15 KB detoast costs, the per-row part is below 0.3% and an epoch
 counter is not warranted.  With the feature off the sidecache equals master within
 600 instructions (the compile-time check).
+
+### Amended sidecache tip dee9436848 (early-out in ExecInitDetoastArg), 2026-09-19
+
+| workload   | master | series | sidecache 8895f4f7 | sidecache dee94368 |
+|------------|-------:|-------:|-------------------:|-------------------:|
+| loop_noop  | 24,046 | 24,119 | 24,277 | 24,306 |
+| loop_jsonb | 32,320 | 32,433 | 32,565 | 32,654 |
+| loop_wide  | 5,014,215 | 5,118,541 | 5,158,405 | 5,167,798 |
+| toast_one  | 53,564 | 53,692 | 53,921 | 53,937 |
+| toast_two  | 82,956 | 59,520 | 59,760 | 59,856 |
+| toast_four | 139,855 | 66,756 | 67,014 | 67,113 |
+
+The early-out changed nothing measurable (differences of 30-90 instructions are
+within layout noise).  A per-symbol profile (perf record, 400k iterations) puts
+ExecInitDetoastArg at 0.37% of loop_noop (~90 instructions per statement: the call
+itself, for every function argument the statement and the plpgsql loop compile) and
+0.67% of loop_jsonb (~220, where the scan has a set and the full check runs), with
+ExprEvalPushStep up 0.6% there; everything else scatters within +-0.5%.  The residual
+could be removed by making the no-sets check a static inline in the callers, worth
+about 0.4% of a trivial statement.  Verification of dee9436848: VM cassert module and
+guard 30/30, CI run 35461872423; the Mac run of that tip was invalid because the
+working tree already held uncommitted follow-up work.
