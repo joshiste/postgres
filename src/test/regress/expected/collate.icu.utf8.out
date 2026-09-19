@@ -1701,13 +1701,14 @@ ORDER BY 1, 2;
    ->  Hash Join
          Output: t1.x, t2.x
          Hash Cond: ((t2.x)::text = (t1.x)::text)
+         Pre-detoast Outer: t2.x
          ->  Seq Scan on collate_tests.test3cs t2
                Output: t2.x
          ->  Hash
                Output: t1.x
                ->  Seq Scan on collate_tests.test1cs t1
                      Output: t1.x
-(12 rows)
+(13 rows)
 
 SELECT * FROM test1cs t1, test3cs t2
 WHERE t1.x = t2.x COLLATE case_insensitive
@@ -1825,6 +1826,7 @@ ORDER BY 1, 2;
    ->  Hash Join
          Output: t1.x, test3cs.x
          Hash Cond: ((t1.x)::text = (test3cs.x)::text)
+         Pre-detoast Outer: t1.x
          ->  Seq Scan on collate_tests.test1cs t1
                Output: t1.x
          ->  Hash
@@ -1834,7 +1836,7 @@ ORDER BY 1, 2;
                      Group Key: test3cs.x
                      ->  Seq Scan on collate_tests.test3cs
                            Output: test3cs.x
-(15 rows)
+(16 rows)
 
 SELECT * FROM test1cs t1, (SELECT DISTINCT x FROM test3cs) t2
 WHERE t1.x = t2.x COLLATE case_insensitive
@@ -1862,6 +1864,7 @@ ORDER BY 1, 2;
    ->  Hash Join
          Output: t1.x, test3cs.x
          Hash Cond: ((t1.x)::text = (test3cs.x)::text)
+         Pre-detoast Outer: t1.x
          ->  Seq Scan on collate_tests.test1cs t1
                Output: t1.x
          ->  Hash
@@ -1871,7 +1874,7 @@ ORDER BY 1, 2;
                      Group Key: test3cs.x
                      ->  Seq Scan on collate_tests.test3cs
                            Output: test3cs.x
-(15 rows)
+(16 rows)
 
 SELECT * FROM test1cs t1, (SELECT x FROM test3cs GROUP BY x) t2
 WHERE t1.x = t2.x COLLATE case_insensitive
@@ -1899,6 +1902,7 @@ ORDER BY 1, 2;
    ->  Hash Join
          Output: t1.x, test3cs.x
          Hash Cond: ((test3cs.x)::text = (t1.x)::text)
+         Pre-detoast Outer: test3cs.x
          ->  HashAggregate
                Output: test3cs.x
                Group Key: test3cs.x
@@ -1911,7 +1915,7 @@ ORDER BY 1, 2;
                Output: t1.x
                ->  Seq Scan on collate_tests.test1cs t1
                      Output: t1.x
-(18 rows)
+(19 rows)
 
 SELECT * FROM test1cs t1, (SELECT x FROM test3cs UNION SELECT x FROM test3cs) t2
 WHERE t1.x = t2.x COLLATE case_insensitive
