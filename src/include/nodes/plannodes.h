@@ -1320,7 +1320,8 @@ typedef struct Agg
 
 	/*
 	 * Input attributes several of the aggregate arguments or quals pass whole
-	 * to functions, as Scan.predetoast_attrs (see set_upper_predetoast_attrs).
+	 * to functions, as Scan.predetoast_attrs (see
+	 * set_upper_predetoast_attrs).
 	 */
 	Bitmapset  *predetoast_outer_attrs;
 } Agg;
