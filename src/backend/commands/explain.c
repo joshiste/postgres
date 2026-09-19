@@ -89,6 +89,8 @@ static void show_qual(List *qual, const char *qlabel,
 static void show_scan_qual(List *qual, const char *qlabel,
 						   PlanState *planstate, List *ancestors,
 						   ExplainState *es);
+static void show_predetoast_attrs(PlanState *planstate, List *ancestors,
+								  ExplainState *es);
 static void show_upper_qual(List *qual, const char *qlabel,
 							PlanState *planstate, List *ancestors,
 							ExplainState *es);
@@ -2295,6 +2297,12 @@ ExplainNode(PlanState *planstate, List *ancestors,
 		}
 	}
 
+	/* Show attributes detoasted once per row */
+	if (es->verbose && (planstate->ps_predetoast_scanattrs ||
+						planstate->ps_predetoast_outerattrs ||
+						planstate->ps_predetoast_innerattrs))
+		show_predetoast_attrs(planstate, ancestors, es);
+
 	/* Show buffer/WAL usage */
 	if (es->buffers && planstate->instrument)
 		show_buffer_usage(es, &planstate->instrument->instr.bufusage);
@@ -2545,6 +2553,71 @@ show_qual(List *qual, const char *qlabel,
 
 	/* And show it */
 	show_expression(node, qlabel, planstate, ancestors, useprefix, es);
+}
+
+/*
+ * Deparse a Var per attribute in attrs, the way the node's other expressions
+ * are shown (so a join input reads "p.doc", an index-only or foreign scan
+ * column its underlying expression).
+ */
+static List *
+predetoast_attr_names(Bitmapset *attrs, Index varno, TupleDesc desc,
+					  List *context, bool useprefix)
+{
+	List	   *names = NIL;
+	int			attno = -1;
+
+	while ((attno = bms_next_member(attrs, attno)) >= 0)
+	{
+		Form_pg_attribute att = TupleDescAttr(desc, attno - 1);
+		Var		   *var = makeVar(varno, attno, att->atttypid, att->atttypmod,
+								  att->attcollation, 0);
+
+		names = lappend(names, deparse_expression((Node *) var, context,
+												  useprefix, false));
+	}
+	return names;
+}
+
+/*
+ * Show which input attributes a node detoasts once per row.
+ */
+static void
+show_predetoast_attrs(PlanState *planstate, List *ancestors, ExplainState *es)
+{
+	List	   *context = set_deparse_context_plan(es->deparse_cxt,
+												   planstate->plan, ancestors);
+	bool		useprefix = es->rtable_size > 1;
+
+	if (planstate->ps_predetoast_scanattrs && planstate->scandesc != NULL)
+	{
+		Scan	   *scan = (Scan *) planstate->plan;
+		Index		varno = ScanUsesIndexVar(planstate->plan) ?
+			INDEX_VAR : scan->scanrelid;
+
+		ExplainPropertyList("Pre-detoast",
+							predetoast_attr_names(planstate->ps_predetoast_scanattrs,
+												  varno, planstate->scandesc,
+												  context, useprefix),
+							es);
+	}
+
+	for (int side = 0; side < 2; side++)
+	{
+		Bitmapset  *attrs = side == 0 ? planstate->ps_predetoast_outerattrs :
+			planstate->ps_predetoast_innerattrs;
+		PlanState  *child = side == 0 ? outerPlanState(planstate) :
+			innerPlanState(planstate);
+
+		if (attrs == NULL || child == NULL || child->ps_ResultTupleDesc == NULL)
+			continue;
+		ExplainPropertyList(side == 0 ? "Pre-detoast Outer" : "Pre-detoast Inner",
+							predetoast_attr_names(attrs,
+												  side == 0 ? OUTER_VAR : INNER_VAR,
+												  child->ps_ResultTupleDesc,
+												  context, useprefix),
+							es);
+	}
 }
 
 /*
