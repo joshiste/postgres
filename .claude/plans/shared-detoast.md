@@ -281,6 +281,17 @@ the tested tree except for the position of one function):
   wiring; sorted Agg's firstSlot is never a TOAST-step target because grouping
   columns are always bare in the Agg tlist.
 
+## Alternative approach: sidecache (2026-09-19)
+
+detoast-sidecache keeps the copy beside the slot (tts_detoasted) and hands it only to
+argument positions, which removes the whole permission model (about 585 lines of
+setrefs.c and 230 of clauses.c) and covers the shapes the series excluded (merge join
+inner, hashed grouping columns, bare projection under storing parents).  Cost: about
+160 more instructions per statement at expression-compile time, and one extra
+detoast when the client receives the bare column next to expressions over it.
+Numbers and shape table in shared-detoast-baseline.md; verification identical to the
+series (Mac, VM cassert check-world, fork CI).
+
 ## Rebase log
 
 - 2026-09-18 (later): series rebased onto upstream master 26a3c0a45c (5 commits, no

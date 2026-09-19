@@ -202,3 +202,59 @@ Q10 is the LATERAL jsonb_path_query_first(jb, '$') trick from the talk; the plan
 flattens it into three calls, so on master it detoasts once per row anyway and the
 series shares that single detoast (Pre-detoast: jb on the scan).  With the feature
 off, the series equals master in time and block counts on every query.
+
+
+## Alternative: detoasted copies beside the slot (detoast-sidecache, 2026-09-19)
+
+Branch detoast-sidecache = the reviewed five-commit series (7fb0318b70) plus one
+commit (8895f4f7d5) that keeps the detoasted copy in a per-slot side array
+(tts_detoasted) instead of writing it into tts_values; only argument positions of
+function-like constructs read the copy, so nothing that stores rows, passes the
+column on whole or inspects the stored form can see it.  The permission flag, the
+safe/all/noproj sets, the raw-reader veto pass and the per-node exclusions are gone.
+
+Instruction harness on eddie-debian (-O2, no cassert; master 26a3c0a45c, series
+7fb0318b70, sidecache 8895f4f7d5), instructions per iteration:
+
+| workload   | master    | series (delta)      | sidecache (delta)   |
+|------------|----------:|--------------------:|--------------------:|
+| loop_noop  |    24,046 |   24,119 (+73)      |   24,277 (+231)     |
+| loop_jsonb |    32,320 |   32,433 (+113)     |   32,565 (+245)     |
+| loop_wide  | 5,014,215 | 5,118,541 (+2.1%)   | 5,158,405 (+2.9%)   |
+
+Planning (plan_cache_mode=force_custom_plan, one round; planning delta = custom
+delta minus generic delta):
+
+| workload   | master custom | series custom (planning) | sidecache custom (planning) |
+|------------|--------------:|-------------------------:|----------------------------:|
+| loop_noop  |    68,865 |  69,267 (+329)  |  69,218 (+122)  |
+| loop_jsonb |    93,577 |  96,024 (+2,334)|  95,545 (+1,723)|
+| loop_wide  | 25,534,558 | 25,848,715 (+1.2%) | 25,907,306 (+1.5%) |
+
+Reading: the sidecache plans cheaper (no veto pass, one set per node) but costs about
+160 more instructions per statement at execution on plans that gain nothing.  That
+is expression-compile time: every function argument goes through
+ExecInitDetoastArg, and cached plans recompile their expressions at each
+ExecutorStart.  On loop_wide (1000 argument positions) the gap is 40k instructions.
+Both remain small against the statement (0.7% and 0.8%).
+
+Behaviour where the approaches differ (detoasts per row, injection points, Mac build):
+
+| shape | series | sidecache |
+|-------|-------:|----------:|
+| client receives bare doc + two ops         | 1 | 2 (client output detoasts the pointer) |
+| bare doc + two ops under a Sort            | 2 (+1 output) | 1 (+1 output) |
+| merge join, two ops on the inner side      | 2 | 1 |
+| hash agg GROUP BY doc, two predicates      | 2 | 1 |
+| raw reader beside two ops                  | 1, pointer kept | 1, pointer kept |
+| UPDATE with two WHERE ops                  | 1, pointer kept | 1, pointer kept |
+
+Workload CPU (backend user time, parallelism off, same data directory): JSONBench Q4/Q5
+and the Bartunov table Q6-Q10 identical within noise between series and sidecache
+(e.g. Q8 0.037 vs 0.031/0.038 s); Q1-Q3 full scans drift with the machine as before.
+Results identical across all configurations.
+
+Verification of the sidecache tip: Mac pgindent, build (0 warnings), module (default
+and debug_parallel_query=regress), regression, postgres_fdw, guard 30/30 at the
+series' targets; VM cassert module, guard 30/30, check-world; fork CI run
+35458028894.
