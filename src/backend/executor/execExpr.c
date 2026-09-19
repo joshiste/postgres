@@ -74,8 +74,8 @@ static void ExecInitExprRec(Expr *node, ExprState *state,
 							Datum *resv, bool *resnull);
 static ExprState *ExecInitExprInternal(Expr *node, PlanState *parent,
 									   bool detoast_arg);
-static void ExecInitDetoastArg(Expr *arg, ExprState *state,
-							   Datum *resv, bool *resnull);
+static void ExecInitDetoastedVar(Expr *arg, ExprState *state,
+								 Datum *resv, bool *resnull);
 static void ExecInitFunc(ExprEvalStep *scratch, Expr *node, List *args,
 						 Oid funcid, Oid inputcollid, bool detoast_args,
 						 ExprState *state);
@@ -108,6 +108,27 @@ static void ExecInitJsonCoercion(ExprState *state, JsonReturning *returning,
 								 ErrorSaveContext *escontext, bool omit_quotes,
 								 bool exists_coerce,
 								 Datum *resv, bool *resnull);
+
+/*
+ * Prepare evaluation of an argument whose whole value the consuming step
+ * reads.  On a node without attributes to detoast once per row, the common
+ * case, this is ExecInitExprRec; otherwise ExecInitDetoastedVar checks
+ * whether the argument is a plain Var of such an attribute.
+ */
+static inline void
+ExecInitDetoastArg(Expr *arg, ExprState *state, Datum *resv, bool *resnull)
+{
+	PlanState  *parent = state->parent;
+
+	if (parent == NULL ||
+		(parent->ps_predetoast_scanattrs == NULL &&
+		 parent->ps_predetoast_outerattrs == NULL &&
+		 parent->ps_predetoast_innerattrs == NULL))
+		ExecInitExprRec(arg, state, resv, resnull);
+	else
+		ExecInitDetoastedVar(arg, state, resv, resnull);
+}
+
 
 
 /*
@@ -2757,34 +2778,24 @@ ExecFuncReadsStoredForm(Oid funcid)
 }
 
 /*
- * Prepare evaluation of an argument whose whole value the consuming step
- * reads.  A plain Var (possibly relabeled) of an attribute the node
- * detoasts once per row is compiled to the corresponding EEOP_*_VAR_TOAST
- * step, which hands out the copy kept beside the slot; everything else, and
- * every Var in any other position, goes through ExecInitExprRec and sees the
- * slot's own datum.  Restricting the step to argument positions is what
- * keeps a detoasted copy from ever becoming an expression result: the
- * constructs that return an input unchanged (bare Vars, RelabelType, CASE,
- * COALESCE, GREATEST/LEAST, NULLIF) never get one.
+ * Out-of-line part of ExecInitDetoastArg, for nodes that detoast something.
+ * A plain Var (possibly relabeled) of an attribute the node detoasts once
+ * per row is compiled to the corresponding EEOP_*_VAR_TOAST step, which
+ * hands out the copy kept beside the slot; everything else, and every Var in
+ * any other position, goes through ExecInitExprRec and sees the slot's own
+ * datum.  Restricting the step to argument positions is what keeps a
+ * detoasted copy from ever becoming an expression result: the constructs
+ * that return an input unchanged (bare Vars, RelabelType, CASE, COALESCE,
+ * GREATEST/LEAST, NULLIF) never get one.
  */
 static void
-ExecInitDetoastArg(Expr *arg, ExprState *state, Datum *resv, bool *resnull)
+ExecInitDetoastedVar(Expr *arg, ExprState *state, Datum *resv, bool *resnull)
 {
 	PlanState  *parent = state->parent;
 	Expr	   *expr = arg;
 	Var		   *var;
 	Bitmapset  *attrs;
 	ExprEvalStep scratch = {0};
-
-	/* the common case: nothing to detoast in this node */
-	if (parent == NULL ||
-		(parent->ps_predetoast_scanattrs == NULL &&
-		 parent->ps_predetoast_outerattrs == NULL &&
-		 parent->ps_predetoast_innerattrs == NULL))
-	{
-		ExecInitExprRec(arg, state, resv, resnull);
-		return;
-	}
 
 	while (IsA(expr, RelabelType))
 		expr = ((RelabelType *) expr)->arg;
