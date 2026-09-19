@@ -286,12 +286,58 @@ NOTICE:  notice triggered for injection point detoast-attr-external
 (1 row)
 
 RESET enable_hashjoin; RESET enable_nestloop;
--- a join key is a reference like any other; the hash of the key and the
--- comparisons on the inner side are computed from the stored datum, the
--- WHERE references on the outer side share
-SET enable_nestloop = off; SET enable_mergejoin = off;
-SELECT count(*) FROM sd p JOIN sd2 q ON p.doc = q.doc WHERE p.doc ? 'a' AND p.doc @> '{"b": 2}';
+-- a projecting child carries its copy along with the stored datum, so a
+-- join reading the child's slot directly finds it: one detoast for the
+-- scan's quals and the join's expressions together
+SET enable_hashjoin = off; SET enable_mergejoin = off;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT p.doc->'a', p.doc->'b' FROM sd p JOIN sd2 q ON p.id = q.id WHERE p.doc ? 'a' AND p.doc @> '{"b": 2}';
+                               QUERY PLAN                               
+------------------------------------------------------------------------
+ Nested Loop
+   Output: (p.doc -> 'a'::text), (p.doc -> 'b'::text)
+   Inner Unique: true
+   Pre-detoast Outer: p.doc
+   ->  Seq Scan on public.sd p
+         Output: p.id, p.doc, p.small, p.txt, p.ctxt
+         Filter: ((p.doc ? 'a'::text) AND (p.doc @> '{"b": 2}'::jsonb))
+         Pre-detoast: p.doc
+   ->  Index Only Scan using sd2_pkey on public.sd2 q
+         Output: q.id
+         Index Cond: (q.id = p.id)
+(11 rows)
+
+SELECT p.doc->'a', p.doc->'b' FROM sd p JOIN sd2 q ON p.id = q.id WHERE p.doc ? 'a' AND p.doc @> '{"b": 2}';
 NOTICE:  notice triggered for injection point detoast-attr-external
+ ?column? | ?column? 
+----------+----------
+ 1        | 2
+(1 row)
+
+RESET enable_hashjoin; RESET enable_mergejoin;
+-- a hash join key on the probe side is hashed and then compared from one
+-- copy; the hashed side is hashed once when the table is built and compared
+-- per match from the stored tuple, and the scan's quals share among
+-- themselves (four detoasts: scan quals, table build, probe key, match)
+SET enable_nestloop = off; SET enable_mergejoin = off;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT count(*) FROM sd p JOIN sd2 q ON p.doc = q.doc WHERE p.doc ? 'a' AND p.doc @> '{"b": 2}';
+                                     QUERY PLAN                                     
+------------------------------------------------------------------------------------
+ Aggregate
+   Output: count(*)
+   ->  Hash Join
+         Hash Cond: (q.doc = p.doc)
+         Pre-detoast Outer: q.doc
+         ->  Seq Scan on public.sd2 q
+               Output: q.id, q.doc
+         ->  Hash
+               Output: p.doc
+               ->  Seq Scan on public.sd p
+                     Output: p.doc
+                     Filter: ((p.doc ? 'a'::text) AND (p.doc @> '{"b": 2}'::jsonb))
+                     Pre-detoast: p.doc
+(13 rows)
+
+SELECT count(*) FROM sd p JOIN sd2 q ON p.doc = q.doc WHERE p.doc ? 'a' AND p.doc @> '{"b": 2}';
 NOTICE:  notice triggered for injection point detoast-attr-external
 NOTICE:  notice triggered for injection point detoast-attr-external
 NOTICE:  notice triggered for injection point detoast-attr-external
@@ -302,6 +348,40 @@ NOTICE:  notice triggered for injection point detoast-attr-external
 (1 row)
 
 RESET enable_nestloop; RESET enable_mergejoin;
+-- a merge join key that a join filter references again is compared from the
+-- same copy: one detoast per side
+SET enable_nestloop = off; SET enable_hashjoin = off;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT count(*) FROM sd p JOIN sd2 q ON p.doc = q.doc AND p.doc ? (q.doc->>'k1');
+                      QUERY PLAN                       
+-------------------------------------------------------
+ Aggregate
+   Output: count(*)
+   ->  Merge Join
+         Merge Cond: (p.doc = q.doc)
+         Join Filter: (p.doc ? (q.doc ->> 'k1'::text))
+         Pre-detoast Outer: p.doc
+         Pre-detoast Inner: q.doc
+         ->  Sort
+               Output: p.doc
+               Sort Key: p.doc
+               ->  Seq Scan on public.sd p
+                     Output: p.doc
+         ->  Sort
+               Output: q.doc
+               Sort Key: q.doc
+               ->  Seq Scan on public.sd2 q
+                     Output: q.doc
+(17 rows)
+
+SELECT count(*) FROM sd p JOIN sd2 q ON p.doc = q.doc AND p.doc ? (q.doc->>'k1');
+NOTICE:  notice triggered for injection point detoast-attr-external
+NOTICE:  notice triggered for injection point detoast-attr-external
+ count 
+-------
+     0
+(1 row)
+
+RESET enable_nestloop; RESET enable_hashjoin;
 -- an ancestor reading a column the join projects bare sees the stored form
 -- (the bare column comes last in the target list, after the expressions
 -- that detoast it)
@@ -698,23 +778,22 @@ NOTICE:  notice triggered for injection point detoast-attr-external
  t
 (1 row)
 
--- window functions: the expressions are evaluated above the WindowAgg, which
--- gets no set of its own, so the scan projects the column bare and nothing is
--- shared (three detoasts per row)
+-- window functions: the output expressions are evaluated by the WindowAgg on
+-- rows read back from its tuplestore and share there; the scan's single
+-- qual reference detoasts on its own (two detoasts per row)
 EXPLAIN (VERBOSE, COSTS OFF) SELECT doc->'a', doc->'b', count(*) OVER () FROM sd3 WHERE doc ? 'k1';
                              QUERY PLAN                             
 --------------------------------------------------------------------
  WindowAgg
    Output: (doc -> 'a'::text), (doc -> 'b'::text), count(*) OVER w1
    Window: w1 AS ()
+   Pre-detoast Outer: doc
    ->  Seq Scan on public.sd3
          Output: doc
          Filter: (sd3.doc ? 'k1'::text)
-(6 rows)
+(7 rows)
 
 SELECT doc->'a', doc->'b', count(*) OVER () FROM sd3 WHERE doc ? 'k1' ORDER BY 1;
-NOTICE:  notice triggered for injection point detoast-attr-external
-NOTICE:  notice triggered for injection point detoast-attr-external
 NOTICE:  notice triggered for injection point detoast-attr-external
 NOTICE:  notice triggered for injection point detoast-attr-external
 NOTICE:  notice triggered for injection point detoast-attr-external

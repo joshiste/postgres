@@ -509,6 +509,9 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		&&CASE_EEOP_ASSIGN_SCAN_VAR,
 		&&CASE_EEOP_ASSIGN_OLD_VAR,
 		&&CASE_EEOP_ASSIGN_NEW_VAR,
+		&&CASE_EEOP_ASSIGN_INNER_VAR_TOAST,
+		&&CASE_EEOP_ASSIGN_OUTER_VAR_TOAST,
+		&&CASE_EEOP_ASSIGN_SCAN_VAR_TOAST,
 		&&CASE_EEOP_ASSIGN_TMP,
 		&&CASE_EEOP_ASSIGN_TMP_MAKE_RO,
 		&&CASE_EEOP_CONST,
@@ -899,6 +902,24 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			resultslot->tts_values[resultnum] = scanslot->tts_values[attnum];
 			resultslot->tts_isnull[resultnum] = scanslot->tts_isnull[attnum];
 
+			EEO_NEXT();
+		}
+
+		EEO_CASE(EEOP_ASSIGN_INNER_VAR_TOAST)
+		{
+			ExecEvalAssignVarToast(state, op, econtext, innerslot);
+			EEO_NEXT();
+		}
+
+		EEO_CASE(EEOP_ASSIGN_OUTER_VAR_TOAST)
+		{
+			ExecEvalAssignVarToast(state, op, econtext, outerslot);
+			EEO_NEXT();
+		}
+
+		EEO_CASE(EEOP_ASSIGN_SCAN_VAR_TOAST)
+		{
+			ExecEvalAssignVarToast(state, op, econtext, scanslot);
 			EEO_NEXT();
 		}
 
@@ -5726,6 +5747,23 @@ ExecEvalWholeRowVar(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
  * context, which ExecClearTuple and the ExecStore* functions reset when the
  * slot moves on to another tuple.
  */
+/* Make sure the slot has its detoast context and side array for this tuple */
+static inline Datum *
+slot_detoasted_array(TupleTableSlot *slot)
+{
+	if (unlikely(slot->tts_detoast_cxt == NULL))
+		slot->tts_detoast_cxt =
+			GenerationContextCreate(slot->tts_mcxt,
+									"detoasted slot values",
+									ALLOCSET_DEFAULT_SIZES);
+	if (slot->tts_detoasted == NULL)
+		slot->tts_detoasted =
+			MemoryContextAllocZero(slot->tts_detoast_cxt,
+								   slot->tts_tupleDescriptor->natts *
+								   sizeof(Datum));
+	return slot->tts_detoasted;
+}
+
 void
 ExecEvalVarToast(ExprState *state, ExprEvalStep *op, ExprContext *econtext,
 				 TupleTableSlot *slot)
@@ -5743,28 +5781,47 @@ ExecEvalVarToast(ExprState *state, ExprEvalStep *op, ExprContext *econtext,
 
 		if (VARATT_IS_EXTERNAL_ONDISK(attr) || VARATT_IS_COMPRESSED(attr))
 		{
-			if (unlikely(slot->tts_detoast_cxt == NULL))
-				slot->tts_detoast_cxt =
-					GenerationContextCreate(slot->tts_mcxt,
-											"detoasted slot values",
-											ALLOCSET_DEFAULT_SIZES);
-			if (slot->tts_detoasted == NULL)
-				slot->tts_detoasted =
-					MemoryContextAllocZero(slot->tts_detoast_cxt,
-										   slot->tts_tupleDescriptor->natts *
-										   sizeof(Datum));
-			if (slot->tts_detoasted[attnum] == (Datum) 0)
+			Datum	   *detoasted = slot_detoasted_array(slot);
+
+			if (detoasted[attnum] == (Datum) 0)
 			{
 				MemoryContext oldcxt;
 
 				oldcxt = MemoryContextSwitchTo(slot->tts_detoast_cxt);
-				slot->tts_detoasted[attnum] = PointerGetDatum(detoast_attr(attr));
+				detoasted[attnum] = PointerGetDatum(detoast_attr(attr));
 				MemoryContextSwitchTo(oldcxt);
 			}
-			value = slot->tts_detoasted[attnum];
+			value = detoasted[attnum];
 		}
 	}
 	*op->resvalue = value;
+}
+
+/*
+ * Assign a Var to the result slot, carrying along the detoasted copy the
+ * source slot may hold for it, so that a parent reading the column as a
+ * function argument finds the copy instead of detoasting again.
+ *
+ * The carried entry points into the source slot's detoast context.  It is
+ * valid exactly as long as the stored datum assigned next to it: both belong
+ * to the source slot's current tuple, and the result slot is cleared before
+ * every projection and when it is materialized.
+ */
+void
+ExecEvalAssignVarToast(ExprState *state, ExprEvalStep *op,
+					   ExprContext *econtext, TupleTableSlot *slot)
+{
+	TupleTableSlot *resultslot = state->resultslot;
+	int			resultnum = op->d.assign_var.resultnum;
+	int			attnum = op->d.assign_var.attnum;
+
+	Assert(attnum >= 0 && attnum < slot->tts_nvalid);
+	Assert(resultnum >= 0 && resultnum < resultslot->tts_tupleDescriptor->natts);
+	resultslot->tts_values[resultnum] = slot->tts_values[attnum];
+	resultslot->tts_isnull[resultnum] = slot->tts_isnull[attnum];
+
+	if (slot->tts_detoasted != NULL && slot->tts_detoasted[attnum] != (Datum) 0)
+		slot_detoasted_array(resultslot)[resultnum] = slot->tts_detoasted[attnum];
 }
 
 void

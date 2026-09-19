@@ -5471,6 +5471,7 @@ explain (verbose, costs off) select * from ft3 f, loct3 l
    Output: f.f1, f.f2, f.f3, l.f1, l.f2, l.f3
    Inner Unique: true
    Hash Cond: ((f.f3)::text = (l.f3)::text)
+   Pre-detoast Outer: f.f3
    ->  Foreign Scan on public.ft3 f
          Output: f.f1, f.f2, f.f3
          Remote SQL: SELECT f1, f2, f3 FROM public.loct3
@@ -5479,7 +5480,7 @@ explain (verbose, costs off) select * from ft3 f, loct3 l
          ->  Index Scan using loct3_f1_key on public.loct3 l
                Output: l.f1, l.f2, l.f3
                Index Cond: (l.f1 = 'foo'::text)
-(12 rows)
+(13 rows)
 
 -- ===================================================================
 -- test SEMI-JOIN pushdown

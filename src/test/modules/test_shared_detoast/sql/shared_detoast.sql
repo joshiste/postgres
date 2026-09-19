@@ -117,12 +117,27 @@ SET enable_hashjoin = off; SET enable_nestloop = off;
 EXPLAIN (VERBOSE, COSTS OFF) SELECT p.doc->'a', p.doc->'b', q.doc->'a', q.doc->'b' FROM sd p JOIN sd2 q ON p.id = q.id;
 SELECT p.doc->'a', p.doc->'b', q.doc->'a', q.doc->'b' FROM sd p JOIN sd2 q ON p.id = q.id;
 RESET enable_hashjoin; RESET enable_nestloop;
--- a join key is a reference like any other; the hash of the key and the
--- comparisons on the inner side are computed from the stored datum, the
--- WHERE references on the outer side share
+-- a projecting child carries its copy along with the stored datum, so a
+-- join reading the child's slot directly finds it: one detoast for the
+-- scan's quals and the join's expressions together
+SET enable_hashjoin = off; SET enable_mergejoin = off;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT p.doc->'a', p.doc->'b' FROM sd p JOIN sd2 q ON p.id = q.id WHERE p.doc ? 'a' AND p.doc @> '{"b": 2}';
+SELECT p.doc->'a', p.doc->'b' FROM sd p JOIN sd2 q ON p.id = q.id WHERE p.doc ? 'a' AND p.doc @> '{"b": 2}';
+RESET enable_hashjoin; RESET enable_mergejoin;
+-- a hash join key on the probe side is hashed and then compared from one
+-- copy; the hashed side is hashed once when the table is built and compared
+-- per match from the stored tuple, and the scan's quals share among
+-- themselves (four detoasts: scan quals, table build, probe key, match)
 SET enable_nestloop = off; SET enable_mergejoin = off;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT count(*) FROM sd p JOIN sd2 q ON p.doc = q.doc WHERE p.doc ? 'a' AND p.doc @> '{"b": 2}';
 SELECT count(*) FROM sd p JOIN sd2 q ON p.doc = q.doc WHERE p.doc ? 'a' AND p.doc @> '{"b": 2}';
 RESET enable_nestloop; RESET enable_mergejoin;
+-- a merge join key that a join filter references again is compared from the
+-- same copy: one detoast per side
+SET enable_nestloop = off; SET enable_hashjoin = off;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT count(*) FROM sd p JOIN sd2 q ON p.doc = q.doc AND p.doc ? (q.doc->>'k1');
+SELECT count(*) FROM sd p JOIN sd2 q ON p.doc = q.doc AND p.doc ? (q.doc->>'k1');
+RESET enable_nestloop; RESET enable_hashjoin;
 -- an ancestor reading a column the join projects bare sees the stored form
 -- (the bare column comes last in the target list, after the expressions
 -- that detoast it)
@@ -256,9 +271,9 @@ CREATE TABLE sd5 AS SELECT id, doc FROM sd3 WHERE doc ? 'a' AND doc ? 'b';
 SELECT pg_column_toast_chunk_id(doc) IS NOT NULL AS pointer_kept, id FROM sd5 ORDER BY id;
 -- an aggregate that keeps its argument whole gets the stored pointer
 SELECT jsonb_agg(doc ORDER BY id) IS NOT NULL FROM sd3 WHERE doc ? 'a' AND doc ? 'b';
--- window functions: the expressions are evaluated above the WindowAgg, which
--- gets no set of its own, so the scan projects the column bare and nothing is
--- shared (three detoasts per row)
+-- window functions: the output expressions are evaluated by the WindowAgg on
+-- rows read back from its tuplestore and share there; the scan's single
+-- qual reference detoasts on its own (two detoasts per row)
 EXPLAIN (VERBOSE, COSTS OFF) SELECT doc->'a', doc->'b', count(*) OVER () FROM sd3 WHERE doc ? 'k1';
 SELECT doc->'a', doc->'b', count(*) OVER () FROM sd3 WHERE doc ? 'k1' ORDER BY 1;
 -- grouping sets: the scan below shares like under any other parent

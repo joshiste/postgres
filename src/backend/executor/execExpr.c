@@ -72,6 +72,8 @@ typedef struct ExprSetupInfo
 static void ExecReadyExpr(ExprState *state);
 static void ExecInitExprRec(Expr *node, ExprState *state,
 							Datum *resv, bool *resnull);
+static ExprState *ExecInitExprInternal(Expr *node, PlanState *parent,
+									   bool detoast_arg);
 static void ExecInitDetoastArg(Expr *arg, ExprState *state,
 							   Datum *resv, bool *resnull);
 static void ExecInitFunc(ExprEvalStep *scratch, Expr *node, List *args,
@@ -145,6 +147,24 @@ static void ExecInitJsonCoercion(ExprState *state, JsonReturning *returning,
 ExprState *
 ExecInitExpr(Expr *node, PlanState *parent)
 {
+	return ExecInitExprInternal(node, parent, false);
+}
+
+/*
+ * ExecInitExprArg: as ExecInitExpr, for an expression whose result the
+ * caller consumes whole as a function argument (a merge clause side, which
+ * is only ever compared), so that a plain Var of an attribute the node
+ * detoasts once per row hands out the copy kept beside the slot.
+ */
+ExprState *
+ExecInitExprArg(Expr *node, PlanState *parent)
+{
+	return ExecInitExprInternal(node, parent, true);
+}
+
+static ExprState *
+ExecInitExprInternal(Expr *node, PlanState *parent, bool detoast_arg)
+{
 	ExprState  *state;
 	ExprEvalStep scratch = {0};
 
@@ -162,7 +182,10 @@ ExecInitExpr(Expr *node, PlanState *parent)
 	ExecCreateExprSetupSteps(state, (Node *) node);
 
 	/* Compile the expression proper */
-	ExecInitExprRec(node, state, &state->resvalue, &state->resnull);
+	if (detoast_arg)
+		ExecInitDetoastArg(node, state, &state->resvalue, &state->resnull);
+	else
+		ExecInitExprRec(node, state, &state->resvalue, &state->resnull);
 
 	/* Finally, append a DONE step */
 	scratch.opcode = EEOP_DONE_RETURN;
@@ -439,16 +462,29 @@ ExecBuildProjectionInfo(List *targetList,
 		if (isSafeVar)
 		{
 			/* Fast-path: just generate an EEOP_ASSIGN_*_VAR step */
+			/*
+			 * A column the node detoasts once per row is assigned by a step
+			 * that also carries the detoasted copy along, so that a parent
+			 * reading the column as a function argument finds it.
+			 */
 			switch (variable->varno)
 			{
 				case INNER_VAR:
 					/* get the tuple from the inner node */
-					scratch.opcode = EEOP_ASSIGN_INNER_VAR;
+					if (parent && bms_is_member(attnum,
+												parent->ps_predetoast_innerattrs))
+						scratch.opcode = EEOP_ASSIGN_INNER_VAR_TOAST;
+					else
+						scratch.opcode = EEOP_ASSIGN_INNER_VAR;
 					break;
 
 				case OUTER_VAR:
 					/* get the tuple from the outer node */
-					scratch.opcode = EEOP_ASSIGN_OUTER_VAR;
+					if (parent && bms_is_member(attnum,
+												parent->ps_predetoast_outerattrs))
+						scratch.opcode = EEOP_ASSIGN_OUTER_VAR_TOAST;
+					else
+						scratch.opcode = EEOP_ASSIGN_OUTER_VAR;
 					break;
 
 					/* INDEX_VAR is handled by default case */
@@ -462,7 +498,11 @@ ExecBuildProjectionInfo(List *targetList,
 					switch (variable->varreturningtype)
 					{
 						case VAR_RETURNING_DEFAULT:
-							scratch.opcode = EEOP_ASSIGN_SCAN_VAR;
+							if (parent && bms_is_member(attnum,
+														parent->ps_predetoast_scanattrs))
+								scratch.opcode = EEOP_ASSIGN_SCAN_VAR_TOAST;
+							else
+								scratch.opcode = EEOP_ASSIGN_SCAN_VAR;
 							break;
 						case VAR_RETURNING_OLD:
 							scratch.opcode = EEOP_ASSIGN_OLD_VAR;
@@ -4478,10 +4518,10 @@ ExecBuildHash32Expr(TupleDesc desc, const TupleTableSlotOps *ops,
 		 * Build the steps to evaluate the hash function's argument, placing
 		 * the value in the 0th argument of the hash func.
 		 */
-		ExecInitExprRec(expr,
-						state,
-						&fcinfo->args[0].value,
-						&fcinfo->args[0].isnull);
+		ExecInitDetoastArg(expr,
+						   state,
+						   &fcinfo->args[0].value,
+						   &fcinfo->args[0].isnull);
 
 		if (i == num_exprs - 1)
 		{

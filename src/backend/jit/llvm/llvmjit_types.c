@@ -170,6 +170,7 @@ void	   *referenced_functions[] =
 	ExecEvalSubPlan,
 	ExecEvalSysVar,
 	ExecEvalVarToast,
+	ExecEvalAssignVarToast,
 	ExecEvalWholeRowVar,
 	ExecEvalXmlExpr,
 	ExecEvalJsonConstructor,

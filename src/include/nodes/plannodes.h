@@ -1400,6 +1400,13 @@ typedef struct WindowAgg
 	 * the plan
 	 */
 	bool		topWindow;
+
+	/*
+	 * Input attributes several of the window function arguments, quals or
+	 * output expressions pass whole to functions, as Scan.predetoast_attrs
+	 * (see set_upper_predetoast_attrs).
+	 */
+	Bitmapset  *predetoast_outer_attrs;
 } WindowAgg;
 
 /* ----------------
