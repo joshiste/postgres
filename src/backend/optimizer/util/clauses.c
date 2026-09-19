@@ -6839,7 +6839,8 @@ typedef struct
 {
 	Index		varno;			/* only Vars of this varno count; 0 = any */
 	Bitmapset  *seen_once;		/* attnos seen in one detoasting position */
-	List	   *multi_vars;		/* one Var per attno seen in two or more */
+	List	   *once_vars;		/* one Var per attno seen at least once */
+	List	   *multi_vars;		/* one Var per attno seen two or more times */
 } pull_multi_detoast_context;
 
 static bool pull_multi_detoast_walker(Node *node,
@@ -6914,7 +6915,10 @@ pull_multi_detoast_count(Node *arg, pull_multi_detoast_context *context)
 		context->multi_vars = lappend(context->multi_vars, var);
 	}
 	else
+	{
 		context->seen_once = bms_add_member(context->seen_once, var->varattno);
+		context->once_vars = lappend(context->once_vars, var);
+	}
 }
 
 /*
@@ -7026,8 +7030,8 @@ pull_multi_detoast_walker(Node *node, pull_multi_detoast_context *context)
 /*
  * pull_multi_detoast_vars
  *		Find scan-slot Vars that at least two expressions in a plan node's
- *		targetlist and qual would detoast.  Each element of args counts as
- *		one more argument position (a hash key the node hashes, say).
+ *		targetlist and qual would detoast, or at least one when single_ref_ok
+ *		(for an input whose tuple stays put while the expressions run again).
  *
  * A reference counts when the Var is a direct argument of a function-like
  * node that reads the whole value and does not return it: function and
@@ -7041,18 +7045,25 @@ pull_multi_detoast_walker(Node *node, pull_multi_detoast_context *context)
  * per attribute number; the caller checks toastability.
  */
 List *
-pull_multi_detoast_vars(List *targetlist, List *qual, List *args, Index varno)
+pull_multi_detoast_vars(List *targetlist, List *qual, bool single_ref_ok,
+						Index varno)
 {
 	pull_multi_detoast_context context;
 
 	context.varno = varno;
 	context.seen_once = NULL;
+	context.once_vars = NIL;
 	context.multi_vars = NIL;
 
 	pull_multi_detoast_walker((Node *) targetlist, &context);
 	pull_multi_detoast_walker((Node *) qual, &context);
-	pull_multi_detoast_args(args, true, &context);
 
 	bms_free(context.seen_once);
+	if (single_ref_ok)
+	{
+		list_free(context.multi_vars);
+		return context.once_vars;
+	}
+	list_free(context.once_vars);
 	return context.multi_vars;
 }

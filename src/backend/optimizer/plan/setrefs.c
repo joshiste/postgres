@@ -675,7 +675,7 @@ set_scan_predetoast_attrs(PlannerInfo *root, Scan *scan)
 	if (!shared_detoast)
 		return;
 
-	vars = pull_multi_detoast_vars(plan->targetlist, plan->qual, NIL, 0);
+	vars = pull_multi_detoast_vars(plan->targetlist, plan->qual, false, 0);
 	if (vars == NIL)
 		return;
 
@@ -716,8 +716,10 @@ set_scan_predetoast_attrs(PlannerInfo *root, Scan *scan)
  *
  * The join's expressions see its inputs through OUTER_VAR and INNER_VAR, and
  * the copies are kept beside the child slots.  Merge and hash clauses count
- * like other quals; a hash join additionally hashes each outer key before
- * comparing it, so the outer keys count once more.  A child output column
+ * like other quals.  On the outer side a single reference is enough: the
+ * outer tuple stays put while the join runs its quals and projection once
+ * per inner row (and a hash join hashes the key and then compares it), so
+ * the first evaluation's copy serves all of them.  A child output column
  * that is a constant or a row built in memory is skipped, since it can
  * never be toasted.
  */
@@ -726,7 +728,6 @@ set_join_predetoast_attrs(Join *join)
 {
 	Plan	   *plan = &join->plan;
 	List	   *quals = list_concat_copy(join->joinqual, plan->qual);
-	List	   *outerkeys = NIL;
 	Index		sides[2] = {OUTER_VAR, INNER_VAR};
 	ListCell   *lc;
 
@@ -736,18 +737,12 @@ set_join_predetoast_attrs(Join *join)
 	if (IsA(join, MergeJoin))
 		quals = list_concat(quals, ((MergeJoin *) join)->mergeclauses);
 	else if (IsA(join, HashJoin))
-	{
 		quals = list_concat(quals, ((HashJoin *) join)->hashclauses);
-		foreach(lc, ((HashJoin *) join)->hashclauses)
-			outerkeys = lappend(outerkeys,
-								linitial(((OpExpr *) lfirst(lc))->args));
-	}
 
 	for (int side = 0; side < 2; side++)
 	{
 		List	   *vars = pull_multi_detoast_vars(plan->targetlist, quals,
-												   sides[side] == OUTER_VAR ?
-												   outerkeys : NIL,
+												   sides[side] == OUTER_VAR,
 												   sides[side]);
 		Plan	   *child = sides[side] == OUTER_VAR ?
 			plan->lefttree : plan->righttree;
@@ -782,7 +777,6 @@ set_join_predetoast_attrs(Join *join)
 			join->predetoast_inner_attrs = attrs;
 	}
 	list_free(quals);
-	list_free(outerkeys);
 }
 
 /*
@@ -802,7 +796,8 @@ set_upper_predetoast_attrs(Plan *plan, Bitmapset **attrs)
 	if (!shared_detoast)
 		return;
 
-	vars = pull_multi_detoast_vars(plan->targetlist, plan->qual, NIL, OUTER_VAR);
+	vars = pull_multi_detoast_vars(plan->targetlist, plan->qual, false,
+								   OUTER_VAR);
 	foreach(lc, vars)
 	{
 		Var		   *var = (Var *) lfirst(lc);

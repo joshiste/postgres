@@ -125,9 +125,10 @@ EXPLAIN (VERBOSE, COSTS OFF) SELECT p.doc->'a', p.doc->'b' FROM sd p JOIN sd2 q 
 SELECT p.doc->'a', p.doc->'b' FROM sd p JOIN sd2 q ON p.id = q.id WHERE p.doc ? 'a' AND p.doc @> '{"b": 2}';
 RESET enable_hashjoin; RESET enable_mergejoin;
 -- a hash join key on the probe side is hashed and then compared from one
--- copy; the hashed side is hashed once when the table is built and compared
--- per match from the stored tuple, and the scan's quals share among
--- themselves (four detoasts: scan quals, table build, probe key, match)
+-- copy, since any outer-side reference counts at a join; the hashed side is
+-- hashed once when the table is built and compared per match from the
+-- stored tuple, and the scan's quals share among themselves (four detoasts:
+-- scan quals, table build, probe key, match)
 SET enable_nestloop = off; SET enable_mergejoin = off;
 EXPLAIN (VERBOSE, COSTS OFF) SELECT count(*) FROM sd p JOIN sd2 q ON p.doc = q.doc WHERE p.doc ? 'a' AND p.doc @> '{"b": 2}';
 SELECT count(*) FROM sd p JOIN sd2 q ON p.doc = q.doc WHERE p.doc ? 'a' AND p.doc @> '{"b": 2}';
@@ -205,6 +206,13 @@ SELECT count(*) FROM sd p WHERE p.doc ? 'a' AND p.doc @> '{"b": 2}' AND EXISTS (
 -- a subplan reading the parameter once per inner row makes the copy itself
 -- and detoasts once per outer row, not per inner row
 SELECT count(*) FROM sd p WHERE EXISTS (SELECT 1 FROM generate_series(1, 3) g WHERE p.doc ? ('k' || g));
+-- an outer column referenced once in a join filter is detoasted once per
+-- outer row, not once per inner row: here the EXISTS is pulled up into a
+-- semi join whose filter references the outer column against each of the
+-- five inner rows (two detoasts per outer row, the scan's own filter and
+-- the join's)
+EXPLAIN (VERBOSE, COSTS OFF) SELECT count(*) FROM sd t WHERE EXISTS (SELECT 1 FROM generate_series(1, 5) g WHERE t.doc ? ('k' || g) AND t.doc ? 'k1');
+SELECT count(*) FROM sd t WHERE EXISTS (SELECT 1 FROM generate_series(1, 5) g WHERE t.doc ? ('k' || g) AND t.doc ? 'k1');
 -- the same for a nestloop parameter
 EXPLAIN (VERBOSE, COSTS OFF) SELECT count(*) FROM sd o, LATERAL (SELECT count(*) FROM generate_series(1, 3) g WHERE o.doc ? ('k' || g) AND o.doc @> '{"b": 2}') s;
 SELECT count(*) FROM sd o, LATERAL (SELECT count(*) FROM generate_series(1, 3) g WHERE o.doc ? ('k' || g) AND o.doc @> '{"b": 2}') s;

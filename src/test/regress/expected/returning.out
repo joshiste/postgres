@@ -688,13 +688,14 @@ DELETE FROM foo WHERE f1 = 4 RETURNING old.*,new.*, *;
    Update on pg_temp.foo foo_2
    ->  Nested Loop
          Output: (foo_2.f2 || ' (deleted)'::text), '-1'::integer, '-1'::bigint, foo_1.ctid, foo_1.tableoid, foo_2.tableoid, foo_2.ctid
+         Pre-detoast Outer: foo_2.f2
          ->  Seq Scan on pg_temp.foo foo_2
                Output: foo_2.f2, foo_2.f1, foo_2.tableoid, foo_2.ctid
                Filter: (foo_2.f1 = 4)
          ->  Seq Scan on pg_temp.foo foo_1
                Output: foo_1.ctid, foo_1.f1, foo_1.tableoid
                Filter: (foo_1.f1 = 4)
-(11 rows)
+(12 rows)
 
 DELETE FROM foo WHERE f1 = 4 RETURNING old.*,new.*, *;
  f1 |     f2     | f3 | f4 | f1 |          f2          | f3 | f4 | f1 |          f2          | f3 | f4 

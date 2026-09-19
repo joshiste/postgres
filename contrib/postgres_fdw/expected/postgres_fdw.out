@@ -2751,6 +2751,7 @@ SELECT * FROM local_tbl LEFT JOIN (SELECT ft1.*, COALESCE(ft1.c3 || ft2.c3, 'foo
                                  ->  Hash Join
                                        Output: ft1.c1, ft1.c2, ft1.c3, ft1.c4, ft1.c5, ft1.c6, ft1.c7, ft1.c8, ft1.*, ft2.*, COALESCE((ft1.c3 || ft2.c3), 'foobar'::text), ft2.c3
                                        Hash Cond: (ft1.c1 = ft2.c1)
+                                       Pre-detoast Outer: ft1.c3
                                        ->  Foreign Scan on public.ft1
                                              Output: ft1.c1, ft1.c2, ft1.c3, ft1.c4, ft1.c5, ft1.c6, ft1.c7, ft1.c8, ft1.*
                                              Remote SQL: SELECT "C 1", c2, c3, c4, c5, c6, c7, c8 FROM "S 1"."T 1" WHERE (("C 1" < 100))
@@ -2759,7 +2760,7 @@ SELECT * FROM local_tbl LEFT JOIN (SELECT ft1.*, COALESCE(ft1.c3 || ft2.c3, 'foo
                                              ->  Foreign Scan on public.ft2
                                                    Output: ft2.*, ft2.c1, ft2.c3
                                                    Remote SQL: SELECT "C 1", c2, c3, c4, c5, c6, c7, c8 FROM "S 1"."T 1"
-(29 rows)
+(30 rows)
 
 ALTER SERVER loopback OPTIONS (DROP extensions);
 ALTER SERVER loopback OPTIONS (ADD fdw_startup_cost '10000.0');
@@ -2772,6 +2773,7 @@ SELECT * FROM local_tbl LEFT JOIN (SELECT ft1.* FROM ft1 INNER JOIN ft2 ON (ft1.
    ->  Nested Loop Left Join
          Output: local_tbl.c1, local_tbl.c2, local_tbl.c3, ft1.c1, ft1.c2, ft1.c3, ft1.c4, ft1.c5, ft1.c6, ft1.c7, ft1.c8, local_tbl.ctid, ft1.*, ft2.*
          Join Filter: (local_tbl.c3 = ft1.c3)
+         Pre-detoast Outer: local_tbl.c3
          ->  Index Scan using local_tbl_pkey on public.local_tbl
                Output: local_tbl.c1, local_tbl.c2, local_tbl.c3, local_tbl.ctid
          ->  Materialize
@@ -2799,7 +2801,7 @@ SELECT * FROM local_tbl LEFT JOIN (SELECT ft1.* FROM ft1 INNER JOIN ft2 ON (ft1.
                                        ->  Foreign Scan on public.ft2
                                              Output: ft2.*, ft2.c1, ft2.c2
                                              Remote SQL: SELECT "C 1", c2, c3, c4, c5, c6, c7, c8 FROM "S 1"."T 1" ORDER BY "C 1" ASC NULLS LAST
-(32 rows)
+(33 rows)
 
 ALTER SERVER loopback OPTIONS (DROP fdw_startup_cost);
 ALTER SERVER loopback OPTIONS (ADD extensions 'postgres_fdw');
@@ -4901,6 +4903,7 @@ EXPLAIN (VERBOSE, COSTS OFF) EXECUTE st2(10, 20);
  Nested Loop Semi Join
    Output: t1.c1, t1.c2, t1.c3, t1.c4, t1.c5, t1.c6, t1.c7, t1.c8
    Join Filter: (t2.c3 = t1.c3)
+   Pre-detoast Outer: t1.c3
    ->  Foreign Scan on public.ft1 t1
          Output: t1.c1, t1.c2, t1.c3, t1.c4, t1.c5, t1.c6, t1.c7, t1.c8
          Remote SQL: SELECT "C 1", c2, c3, c4, c5, c6, c7, c8 FROM "S 1"."T 1" WHERE (("C 1" < 20)) ORDER BY "C 1" ASC NULLS LAST
@@ -4910,7 +4913,7 @@ EXPLAIN (VERBOSE, COSTS OFF) EXECUTE st2(10, 20);
                Output: t2.c3
                Filter: (date(t2.c4) = '01-17-1970'::date)
                Remote SQL: SELECT c3, c4 FROM "S 1"."T 1" WHERE (("C 1" > 10))
-(12 rows)
+(13 rows)
 
 EXECUTE st2(10, 20);
  c1 | c2 |  c3   |              c4              |            c5            | c6 |     c7     | c8  
@@ -9814,6 +9817,7 @@ update parent set b = parent.b || remt2.b from remt2 where parent.a = remt2.a re
    ->  Nested Loop
          Output: (parent.b || remt2.b), remt2.*, remt2.a, remt2.b, parent.tableoid, parent.ctid, (NULL::record)
          Join Filter: (parent.a = remt2.a)
+         Pre-detoast Outer: parent.b
          ->  Append
                ->  Seq Scan on public.parent parent_1
                      Output: parent_1.b, parent_1.a, parent_1.tableoid, parent_1.ctid, NULL::record
@@ -9825,7 +9829,7 @@ update parent set b = parent.b || remt2.b from remt2 where parent.a = remt2.a re
                ->  Foreign Scan on public.remt2
                      Output: remt2.b, remt2.*, remt2.a
                      Remote SQL: SELECT a, b FROM public.loct2
-(19 rows)
+(20 rows)
 
 update parent set b = parent.b || remt2.b from remt2 where parent.a = remt2.a returning *;
  a |   b    | a |  b  
@@ -12576,6 +12580,7 @@ INSERT INTO join_tbl SELECT t1.a, t1.b, 'AAA' || t1.c, t2.a, t2.b, 'AAA' || t2.c
          ->  Hash Join
                Output: t1_3.a, t1_3.b, ('AAA'::text || t1_3.c), t2_3.a, t2_3.b, ('AAA'::text || t2_3.c)
                Hash Cond: ((t2_3.a = t1_3.a) AND (t2_3.b = t1_3.b))
+               Pre-detoast Outer: t2_3.c
                ->  Seq Scan on public.async_p3 t2_3
                      Output: t2_3.a, t2_3.b, t2_3.c
                ->  Hash
@@ -12583,7 +12588,7 @@ INSERT INTO join_tbl SELECT t1.a, t1.b, 'AAA' || t1.c, t2.a, t2.b, 'AAA' || t2.c
                      ->  Seq Scan on public.async_p3 t1_3
                            Output: t1_3.a, t1_3.b, t1_3.c
                            Filter: ((t1_3.b % 100) = 0)
-(20 rows)
+(21 rows)
 
 INSERT INTO join_tbl SELECT t1.a, t1.b, 'AAA' || t1.c, t2.a, t2.b, 'AAA' || t2.c FROM async_pt t1, async_pt t2 WHERE t1.a = t2.a AND t1.b = t2.b AND t1.b % 100 = 0;
 SELECT * FROM join_tbl ORDER BY a1;
