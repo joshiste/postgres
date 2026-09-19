@@ -333,6 +333,7 @@ ExecProcNode(PlanState *node)
  */
 extern ExprState *ExecInitExpr(Expr *node, PlanState *parent);
 extern ExprState *ExecInitExprArg(Expr *node, PlanState *parent);
+extern List *ExecInitExprArgList(List *nodes, PlanState *parent);
 extern bool ExecFuncReadsStoredForm(Oid funcid);
 extern ExprState *ExecInitExprWithParams(Expr *node, ParamListInfo ext_params);
 extern ExprState *ExecInitQual(List *qual, PlanState *parent);

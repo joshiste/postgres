@@ -181,6 +181,7 @@ typedef enum ExprEvalOp
 
 	/* evaluate PARAM_EXEC/EXTERN parameters */
 	EEOP_PARAM_EXEC,
+	EEOP_PARAM_EXEC_TOAST,		/* same, preferring the detoasted copy */
 	EEOP_PARAM_EXTERN,
 	EEOP_PARAM_CALLBACK,
 	/* set PARAM_EXEC value */
@@ -434,6 +435,9 @@ typedef struct ExprEvalStep
 		{
 			int			paramid;	/* numeric ID for parameter */
 			Oid			paramtype;	/* OID of parameter's datatype */
+			/* EEOP_PARAM_SET: the Var the value comes from, if a plain one */
+			int			srcattnum;	/* attribute number, or 0 */
+			Index		srcvarno;	/* INNER_VAR, OUTER_VAR or a scan varno */
 		}			param;
 
 		/* for EEOP_PARAM_CALLBACK */
@@ -868,6 +872,8 @@ extern void ExecEvalFuncExprStrictFusage(ExprState *state, ExprEvalStep *op,
 										 ExprContext *econtext);
 extern void ExecEvalParamExec(ExprState *state, ExprEvalStep *op,
 							  ExprContext *econtext);
+extern void ExecEvalParamExecToast(ExprState *state, ExprEvalStep *op,
+								   ExprContext *econtext);
 extern void ExecEvalParamSet(ExprState *state, ExprEvalStep *op,
 							 ExprContext *econtext);
 extern void ExecEvalParamExtern(ExprState *state, ExprEvalStep *op,

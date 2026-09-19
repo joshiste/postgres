@@ -158,6 +158,7 @@ void	   *referenced_functions[] =
 	ExecEvalMinMax,
 	ExecEvalNextValueExpr,
 	ExecEvalParamExec,
+	ExecEvalParamExecToast,
 	ExecEvalParamExtern,
 	ExecEvalParamSet,
 	ExecEvalRow,
