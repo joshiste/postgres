@@ -139,6 +139,8 @@ static void add_rte_to_flat_rtable(PlannerGlobal *glob, List *rteperminfos,
 								   RangeTblEntry *rte);
 static Plan *set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset);
 static void set_scan_predetoast_attrs(PlannerInfo *root, Scan *scan);
+static void set_join_predetoast_attrs(Join *join);
+static void set_upper_predetoast_attrs(Plan *plan, Bitmapset **attrs);
 static Plan *set_indexonlyscan_references(PlannerInfo *root,
 										  IndexOnlyScan *plan,
 										  int rtoffset);
@@ -673,7 +675,7 @@ set_scan_predetoast_attrs(PlannerInfo *root, Scan *scan)
 	if (!shared_detoast)
 		return;
 
-	vars = pull_multi_detoast_vars(plan->targetlist, plan->qual, NIL, 0);
+	vars = pull_multi_detoast_vars(plan->targetlist, plan->qual, false, 0);
 	if (vars == NIL)
 		return;
 
@@ -706,6 +708,104 @@ set_scan_predetoast_attrs(PlannerInfo *root, Scan *scan)
 	list_free(vars);
 
 	scan->predetoast_attrs = attrs;
+}
+
+/*
+ * set_join_predetoast_attrs
+ *		Same as set_scan_predetoast_attrs, per input side of a join.
+ *
+ * The join's expressions see its inputs through OUTER_VAR and INNER_VAR, and
+ * the copies are kept beside the child slots.  Merge and hash clauses count
+ * like other quals.  On the outer side a single reference is enough: the
+ * outer tuple stays put while the join runs its quals and projection once
+ * per inner row (and a hash join hashes the key and then compares it), so
+ * the first evaluation's copy serves all of them.  A child output column
+ * that is a constant or a row built in memory is skipped, since it can
+ * never be toasted.
+ */
+static void
+set_join_predetoast_attrs(Join *join)
+{
+	Plan	   *plan = &join->plan;
+	List	   *quals = list_concat_copy(join->joinqual, plan->qual);
+	Index		sides[2] = {OUTER_VAR, INNER_VAR};
+	ListCell   *lc;
+
+	if (!shared_detoast)
+		return;
+
+	if (IsA(join, MergeJoin))
+		quals = list_concat(quals, ((MergeJoin *) join)->mergeclauses);
+	else if (IsA(join, HashJoin))
+		quals = list_concat(quals, ((HashJoin *) join)->hashclauses);
+
+	for (int side = 0; side < 2; side++)
+	{
+		List	   *vars = pull_multi_detoast_vars(plan->targetlist, quals,
+												   sides[side] == OUTER_VAR,
+												   sides[side]);
+		Plan	   *child = sides[side] == OUTER_VAR ?
+			plan->lefttree : plan->righttree;
+		Bitmapset  *attrs = NULL;
+
+		foreach(lc, vars)
+		{
+			Var		   *var = (Var *) lfirst(lc);
+			Node	   *cexpr;
+
+			if (!toastable_type(var->vartype))
+				continue;
+
+			/*
+			 * A constant, or a row the child builds in memory, is never
+			 * toasted.  The child's targetlist is not fixed yet, so either
+			 * may still be wrapped in a PlaceHolderVar.
+			 */
+			cexpr = (Node *) list_nth_node(TargetEntry, child->targetlist,
+										   var->varattno - 1)->expr;
+			while (IsA(cexpr, PlaceHolderVar))
+				cexpr = (Node *) ((PlaceHolderVar *) cexpr)->phexpr;
+			if (IsA(cexpr, Const) || IsA(cexpr, RowExpr))
+				continue;
+			attrs = bms_add_member(attrs, var->varattno);
+		}
+		list_free(vars);
+
+		if (sides[side] == OUTER_VAR)
+			join->predetoast_outer_attrs = attrs;
+		else
+			join->predetoast_inner_attrs = attrs;
+	}
+	list_free(quals);
+}
+
+/*
+ * set_upper_predetoast_attrs
+ *		Same as set_join_predetoast_attrs, for the single input of an Agg or
+ *		WindowAgg node: aggregate or window function arguments, quals and
+ *		output expressions that pass the same input column whole to
+ *		functions more than once.
+ */
+static void
+set_upper_predetoast_attrs(Plan *plan, Bitmapset **attrs)
+{
+	List	   *vars;
+	ListCell   *lc;
+
+	*attrs = NULL;
+	if (!shared_detoast)
+		return;
+
+	vars = pull_multi_detoast_vars(plan->targetlist, plan->qual, false,
+								   OUTER_VAR);
+	foreach(lc, vars)
+	{
+		Var		   *var = (Var *) lfirst(lc);
+
+		if (toastable_type(var->vartype))
+			*attrs = bms_add_member(*attrs, var->varattno);
+	}
+	list_free(vars);
 }
 
 /*
@@ -1065,6 +1165,7 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 				}
 
 				set_upper_references(root, plan, rtoffset);
+				set_upper_predetoast_attrs(plan, &agg->predetoast_outer_attrs);
 			}
 			break;
 		case T_Group:
@@ -1087,6 +1188,7 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 																			(Plan *) wplan);
 
 				set_upper_references(root, plan, rtoffset);
+				set_upper_predetoast_attrs(plan, &wplan->predetoast_outer_attrs);
 
 				/*
 				 * Like Limit node limit/offset expressions, WindowAgg has
@@ -2594,6 +2696,8 @@ set_join_references(PlannerInfo *root, Join *join, int rtoffset)
 									rtoffset,
 									(bms_is_empty(join->ojrelids) ? NRM_EQUAL : NRM_SUPERSET),
 									NUM_EXEC_QUAL((Plan *) join));
+
+	set_join_predetoast_attrs(join);
 
 	pfree(outer_itlist);
 	pfree(inner_itlist);
