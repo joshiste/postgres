@@ -332,6 +332,7 @@ ExecProcNode(PlanState *node)
  * prototypes from functions in execExpr.c
  */
 extern ExprState *ExecInitExpr(Expr *node, PlanState *parent);
+extern ExprState *ExecInitExprArg(Expr *node, PlanState *parent);
 extern ExprState *ExecInitExprWithParams(Expr *node, ParamListInfo ext_params);
 extern ExprState *ExecInitQual(List *qual, PlanState *parent);
 extern ExprState *ExecInitCheck(List *qual, PlanState *parent);
@@ -584,6 +585,11 @@ extern Datum ExecMakeFunctionResultSet(SetExprState *fcache,
 /*
  * prototypes from functions in execScan.c
  */
+extern PGDLLIMPORT bool shared_detoast;
+
+/* prototypes from functions in execExpr.c */
+extern bool ExecFuncReadsStoredForm(Oid funcid);
+
 typedef TupleTableSlot *(*ExecScanAccessMtd) (ScanState *node);
 typedef bool (*ExecScanRecheckMtd) (ScanState *node, TupleTableSlot *slot);
 

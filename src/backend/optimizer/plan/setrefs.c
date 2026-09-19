@@ -17,6 +17,7 @@
 
 #include "access/transam.h"
 #include "catalog/pg_type.h"
+#include "executor/executor.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/optimizer.h"
@@ -26,9 +27,12 @@
 #include "optimizer/subselect.h"
 #include "optimizer/tlist.h"
 #include "parser/parse_relation.h"
+#include "parser/parsetree.h"
 #include "rewrite/rewriteManip.h"
 #include "tcop/utility.h"
+#include "utils/lsyscache.h"
 #include "utils/syscache.h"
+#include "utils/typcache.h"
 
 
 typedef enum
@@ -134,6 +138,7 @@ static bool flatten_rtes_walker(Node *node, flatten_rtes_walker_context *cxt);
 static void add_rte_to_flat_rtable(PlannerGlobal *glob, List *rteperminfos,
 								   RangeTblEntry *rte);
 static Plan *set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset);
+static void set_scan_predetoast_attrs(PlannerInfo *root, Scan *scan);
 static Plan *set_indexonlyscan_references(PlannerInfo *root,
 										  IndexOnlyScan *plan,
 										  int rtoffset);
@@ -628,6 +633,79 @@ add_rte_to_flat_rtable(PlannerGlobal *glob, List *rteperminfos,
 		newperminfo = addRTEPermissionInfo(&glob->finalrteperminfos, newrte);
 		memcpy(newperminfo, perminfo, sizeof(RTEPermissionInfo));
 	}
+}
+
+/*
+ * toastable_type
+ *		Is this a varlena type whose values may be stored out of line or
+ *		compressed?  The type cache has both facts without a catalog fetch.
+ */
+static bool
+toastable_type(Oid typid)
+{
+	TypeCacheEntry *typentry = lookup_type_cache(typid, 0);
+
+	return typentry->typlen == -1 && typentry->typstorage != TYPSTORAGE_PLAIN;
+}
+
+/*
+ * set_scan_predetoast_attrs
+ *		Record which scan-slot attributes the executor may detoast once per
+ *		row, now that the node's expressions are final.
+ *
+ * Candidates are toastable attributes that two or more expressions of the
+ * node pass whole to a function.  Nothing else needs deciding here: the copy
+ * lives beside the slot and only argument positions read it (see
+ * ExecInitDetoastArg), so it can neither end up in a stored tuple nor reach
+ * a function that inspects the stored form.
+ */
+static void
+set_scan_predetoast_attrs(PlannerInfo *root, Scan *scan)
+{
+	Plan	   *plan = &scan->plan;
+	List	   *vars;
+	Oid			relid = InvalidOid;
+	Bitmapset  *attrs = NULL;
+	ListCell   *lc;
+
+	scan->predetoast_attrs = NULL;
+
+	if (!shared_detoast)
+		return;
+
+	vars = pull_multi_detoast_vars(plan->targetlist, plan->qual, NIL, 0);
+	if (vars == NIL)
+		return;
+
+	/*
+	 * Column-level storage settings override the type's default, so consult
+	 * pg_attribute when the scan tuple is a table row.  Scans whose tuple has
+	 * a shape of their own (see ScanUsesIndexVar) fall back to the type.
+	 */
+	if (!ScanUsesIndexVar(plan))
+	{
+		/* scanrelid was already offset into the flattened range table */
+		RangeTblEntry *rte = rt_fetch(scan->scanrelid, root->glob->finalrtable);
+
+		if (rte->rtekind == RTE_RELATION)
+			relid = rte->relid;
+	}
+
+	foreach(lc, vars)
+	{
+		Var		   *var = (Var *) lfirst(lc);
+
+		if (!toastable_type(var->vartype))
+			continue;
+		/* a column may have been set to PLAIN storage explicitly */
+		if (OidIsValid(relid) &&
+			get_attstorage(relid, var->varattno) == TYPSTORAGE_PLAIN)
+			continue;
+		attrs = bms_add_member(attrs, var->varattno);
+	}
+	list_free(vars);
+
+	scan->predetoast_attrs = attrs;
 }
 
 /*
@@ -1347,6 +1425,14 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 	}
 
 	/*
+	 * For scan nodes, record which scan-slot attributes more than one of the
+	 * (now final) expressions would detoast, so the executor can detoast them
+	 * once per row without walking the expressions again at every start.
+	 */
+	if (IsScanPlan(plan))
+		set_scan_predetoast_attrs(root, (Scan *) plan);
+
+	/*
 	 * Now recurse into child plans, if any
 	 *
 	 * NOTE: it is essential that we recurse into child plans AFTER we set
@@ -1484,6 +1570,7 @@ set_subqueryscan_references(PlannerInfo *root,
 		plan->scan.plan.qual =
 			fix_scan_list(root, plan->scan.plan.qual,
 						  rtoffset, NUM_EXEC_QUAL((Plan *) plan));
+		set_scan_predetoast_attrs(root, &plan->scan);
 
 		result = (Plan *) plan;
 	}
