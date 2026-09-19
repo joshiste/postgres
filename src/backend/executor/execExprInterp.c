@@ -5714,45 +5714,57 @@ ExecEvalWholeRowVar(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
 }
 
 /*
- * Evaluate a Var whose value should be detoasted once and kept in the slot.
+ * Evaluate a Var whose value is detoasted once per tuple, with the copy kept
+ * beside the slot.
  *
  * Only out-of-line and compressed values are worth the trouble; short-header
- * values stay as they are.  The detoasted copy replaces the toast pointer in
- * tts_values, so every later reference to this attribute in the same node
- * (and in parents that read the slot directly) sees the plain value.  The
- * memory lives in the slot's detoast context, which ExecClearTuple and the
- * ExecStore* functions reset when the slot moves on to another tuple.
+ * values are returned as they are.  The copy goes into tts_detoasted, never
+ * into tts_values, so every other reader of the slot (a projection of the
+ * bare column, a slot copy or spill, a function inspecting the stored form)
+ * keeps seeing the stored datum; only the argument positions compiled by
+ * ExecInitDetoastArg see the copy.  The memory lives in the slot's detoast
+ * context, which ExecClearTuple and the ExecStore* functions reset when the
+ * slot moves on to another tuple.
  */
 void
 ExecEvalVarToast(ExprState *state, ExprEvalStep *op, ExprContext *econtext,
 				 TupleTableSlot *slot)
 {
 	int			attnum = op->d.var.attnum;
+	Datum		value;
 
 	Assert(attnum >= 0 && attnum < slot->tts_nvalid);
 
-	if (!slot->tts_isnull[attnum])
+	*op->resnull = slot->tts_isnull[attnum];
+	value = slot->tts_values[attnum];
+	if (!*op->resnull)
 	{
-		varlena    *attr = (varlena *) DatumGetPointer(slot->tts_values[attnum]);
+		varlena    *attr = (varlena *) DatumGetPointer(value);
 
 		if (VARATT_IS_EXTERNAL_ONDISK(attr) || VARATT_IS_COMPRESSED(attr))
 		{
-			MemoryContext oldcxt;
-
 			if (unlikely(slot->tts_detoast_cxt == NULL))
 				slot->tts_detoast_cxt =
 					GenerationContextCreate(slot->tts_mcxt,
 											"detoasted slot values",
 											ALLOCSET_DEFAULT_SIZES);
-			oldcxt = MemoryContextSwitchTo(slot->tts_detoast_cxt);
-			attr = detoast_attr(attr);
-			MemoryContextSwitchTo(oldcxt);
-			slot->tts_values[attnum] = PointerGetDatum(attr);
+			if (slot->tts_detoasted == NULL)
+				slot->tts_detoasted =
+					MemoryContextAllocZero(slot->tts_detoast_cxt,
+										   slot->tts_tupleDescriptor->natts *
+										   sizeof(Datum));
+			if (slot->tts_detoasted[attnum] == (Datum) 0)
+			{
+				MemoryContext oldcxt;
+
+				oldcxt = MemoryContextSwitchTo(slot->tts_detoast_cxt);
+				slot->tts_detoasted[attnum] = PointerGetDatum(detoast_attr(attr));
+				MemoryContextSwitchTo(oldcxt);
+			}
+			value = slot->tts_detoasted[attnum];
 		}
 	}
-
-	*op->resvalue = slot->tts_values[attnum];
-	*op->resnull = slot->tts_isnull[attnum];
+	*op->resvalue = value;
 }
 
 void

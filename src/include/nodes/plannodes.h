@@ -543,22 +543,11 @@ typedef struct Scan
 
 	/*
 	 * Toastable scan-slot attributes that several of this node's expressions
-	 * detoast, which the executor may therefore detoast once per row in place
-	 * (see ExecScanPredetoastAttrs).  predetoast_attrs_safe holds those that
-	 * leave the node only inside expression results; predetoast_attrs_all
-	 * adds those the node also passes up unchanged, which is only safe when
-	 * the parent chain never stores a tuple.
+	 * pass whole to functions, which the executor therefore detoasts once per
+	 * row, keeping the copy beside the scan slot (see
+	 * set_scan_predetoast_attrs and ExecInitDetoastArg).
 	 */
-	Bitmapset  *predetoast_attrs_safe;
-	Bitmapset  *predetoast_attrs_all;
-
-	/*
-	 * True when predetoast_attrs_safe was computed for a scan that projects
-	 * nothing and hands its whole slot to the parent, in which case its
-	 * contents come from what that parent does with the slot (see
-	 * set_child_predetoast_noproj) rather than from this node's projection.
-	 */
-	bool		predetoast_noproj;
+	Bitmapset  *predetoast_attrs;
 } Scan;
 
 /*
@@ -1069,13 +1058,11 @@ typedef struct Join
 
 	/*
 	 * Per input side, the toastable attributes several of this node's
-	 * expressions detoast, as for Scan.predetoast_attrs_safe/_all (see
+	 * expressions pass whole to functions, as Scan.predetoast_attrs (see
 	 * set_join_predetoast_attrs).
 	 */
-	Bitmapset  *predetoast_outer_safe;
-	Bitmapset  *predetoast_outer_all;
-	Bitmapset  *predetoast_inner_safe;
-	Bitmapset  *predetoast_inner_all;
+	Bitmapset  *predetoast_outer_attrs;
+	Bitmapset  *predetoast_inner_attrs;
 } Join;
 
 /* ----------------
@@ -1332,9 +1319,8 @@ typedef struct Agg
 	List	   *chain;
 
 	/*
-	 * Input attributes several of the aggregate arguments or quals detoast,
-	 * which the executor may detoast once per input row in the child's slot
-	 * (see set_agg_predetoast_attrs).
+	 * Input attributes several of the aggregate arguments or quals pass whole
+	 * to functions, as Scan.predetoast_attrs (see set_agg_predetoast_attrs).
 	 */
 	Bitmapset  *predetoast_outer_attrs;
 } Agg;

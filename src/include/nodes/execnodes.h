@@ -731,9 +731,6 @@ typedef struct EState
 									 * ExecutorRun() calls. */
 
 	int			es_top_eflags;	/* eflags passed to ExecutorStart */
-	int			es_init_eflags; /* eflags of the node ExecInitNode is
-								 * currently initializing; valid only during
-								 * InitPlan */
 	int			es_instrument;	/* OR of InstrumentOption flags */
 	bool		es_finished;	/* true when ExecutorFinish is done */
 
@@ -1224,12 +1221,13 @@ typedef struct PlanState
 	ProjectionInfo *ps_ProjInfo;	/* info for doing tuple projection */
 
 	/*
-	 * Scan-slot attribute numbers whose Var references in this node's
-	 * expressions detoast the value once into the slot (EEOP_SCAN_VAR_TOAST)
-	 * instead of at every reference.  NULL for nodes without a scan slot.
+	 * Scan-slot attribute numbers whose Var references in argument positions
+	 * of this node's expressions compile to EEOP_SCAN_VAR_TOAST, which
+	 * detoasts the value once per row and keeps the copy beside the slot (see
+	 * ExecInitDetoastArg).  NULL for nodes without a scan slot.
 	 */
 	Bitmapset  *ps_predetoast_scanattrs;
-	Bitmapset  *ps_predetoast_outerattrs;	/* same, for a join's inputs */
+	Bitmapset  *ps_predetoast_outerattrs;	/* same, for a node's inputs */
 	Bitmapset  *ps_predetoast_innerattrs;
 
 	bool		async_capable;	/* true if node is async-capable */

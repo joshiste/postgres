@@ -321,8 +321,7 @@ ExecInitLockRows(LockRows *node, EState *estate, int eflags)
 	/*
 	 * then initialize outer plan
 	 */
-	outerPlanState(lrstate) = ExecInitNode(outerPlan, estate,
-										   EXEC_PASS_ROW_CONSUMER(eflags));
+	outerPlanState(lrstate) = ExecInitNode(outerPlan, estate, eflags);
 
 	/* node returns unmodified slots from the outer plan */
 	lrstate->ps.resultopsset = true;

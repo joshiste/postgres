@@ -1,4 +1,11 @@
--- Detoasting a scan column once per row when several expressions reference it.
+-- Detoasting a column once per row when several expressions reference it.
+--
+-- The detoasted copy is kept beside the slot (tts_detoasted); tts_values keeps
+-- the stored datum.  Only argument positions of functions and operators read
+-- the copy, so anything that stores rows, passes the column on whole, or
+-- inspects its stored form sees the toast pointer without needing a rule for
+-- it.  The cases below pin the number of detoasts per query shape and, where
+-- a pointer must survive, that it does.
 --
 -- No statement here forces JIT: sanitizer builds crash inside LLVM on any
 -- forced JIT compilation.  Run the whole file with jit_above_cost = 0 (and
@@ -50,10 +57,11 @@ SELECT doc->'a' FROM sd WHERE doc ? 'b' AND doc @> '{"c": 3}';
 SELECT id FROM sd WHERE doc ? 'zzz' AND doc @> '{"c": 3}';
 -- a chained operator counts once for the inner Var
 SELECT doc->'a'->'x', doc->'a'->'y' FROM sd;
--- EXPLAIN shows what the scan detoasts in place
+-- EXPLAIN shows what the scan detoasts once per row
 EXPLAIN (VERBOSE, COSTS OFF) SELECT doc->'a', doc->'b' FROM sd WHERE doc ? 'c';
 
--- representation readers veto the optimization: two detoasts, stored sizes reported
+-- functions that inspect the stored form get the stored datum while the
+-- other references share: one detoast, stored sizes reported
 SELECT pg_column_size(doc) > 8192 AS stored_size, pg_column_compression(doc) IS NULL AS uncompressed,
        doc->'a', doc->'b' FROM sd;
 -- slice and size readers do not count as detoasting references: no detoast at all
@@ -61,19 +69,18 @@ SELECT octet_length(txt), substr(txt, 1, 3), starts_with(txt, 'abc'), left(txt, 
 -- a compressed inline value is decompressed once for two full readers
 SELECT length(md5(ctxt)), ctxt = ctxt FROM sd;
 
--- a bare Var projected under a Sort must keep the toast pointer: two detoasts
+-- a bare Var projected under a Sort stores the toast pointer, and the
+-- expressions still share: one detoast
 WITH s AS MATERIALIZED (SELECT doc->'a' AS a, doc->'b' AS b, doc AS d FROM sd ORDER BY id)
-SELECT a, b FROM s;
--- the same expressions without the bare Var under the Sort: one detoast
-WITH s AS MATERIALIZED (SELECT doc->'a' AS a, doc->'b' AS b FROM sd ORDER BY id)
-SELECT a, b FROM s;
+SELECT a, b, pg_column_toast_chunk_id(d) IS NOT NULL AS pointer_kept FROM s;
 -- a CTE scan over a materialized toast pointer: one detoast
 WITH d AS MATERIALIZED (SELECT doc FROM sd) SELECT doc->'a', doc->'b' FROM d;
 -- a scan inside a correlated subplan: one detoast
 SELECT (SELECT q.doc->'a' || q.doc->'b' FROM sd q WHERE q.id = p.id) FROM sd p;
 -- through LockRows: one detoast
 SELECT doc->'a', doc->'b' FROM sd FOR UPDATE;
--- an UPDATE whose WHERE references the column twice keeps the toast pointer
+-- an UPDATE whose WHERE references the column twice detoasts once and keeps
+-- the toast pointer in the new tuple
 CREATE TEMP TABLE before AS SELECT pg_column_toast_chunk_id(doc) AS chunk FROM sd;
 UPDATE sd SET small = small WHERE doc ? 'a' AND doc @> '{"b": 2}';
 SELECT pg_column_toast_chunk_id(doc) = (SELECT chunk FROM before) AS pointer_kept FROM sd;
@@ -92,9 +99,9 @@ SET debug_parallel_query = on;
 SELECT abs(shared_blocks($$SELECT doc->'a', doc->'b' FROM sd$$) - shared_blocks($$SELECT doc->'a' FROM sd$$)) < 10 AS no_extra_toast_fetches;
 SET debug_parallel_query = off;
 DROP FUNCTION shared_blocks(text);
--- joins: the expressions are evaluated at the join, the value lives in the
--- child's slot; hash join (probe side), nested loop (both sides) and the outer
--- side of a merge join detoast once, the inner side of a merge join is left alone
+-- joins: the expressions are evaluated at the join and the copy is kept
+-- beside the child's slot; hash join (probe side), nested loop (both sides)
+-- and both sides of a merge join detoast once
 CREATE TABLE sd2 (id int PRIMARY KEY, doc jsonb);
 ALTER TABLE sd2 ALTER COLUMN doc SET STORAGE EXTERNAL;
 INSERT INTO sd2 SELECT id, doc FROM sd;
@@ -107,23 +114,24 @@ SET enable_hashjoin = off; SET enable_mergejoin = off;
 SELECT p.doc->'a', p.doc->'b', q.doc->'a', q.doc->'b' FROM sd p JOIN sd2 q ON p.id = q.id;
 RESET enable_hashjoin; RESET enable_mergejoin;
 SET enable_hashjoin = off; SET enable_nestloop = off;
-EXPLAIN (COSTS OFF) SELECT p.doc->'a', p.doc->'b', q.doc->'a', q.doc->'b' FROM sd p JOIN sd2 q ON p.id = q.id;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT p.doc->'a', p.doc->'b', q.doc->'a', q.doc->'b' FROM sd p JOIN sd2 q ON p.id = q.id;
 SELECT p.doc->'a', p.doc->'b', q.doc->'a', q.doc->'b' FROM sd p JOIN sd2 q ON p.id = q.id;
 RESET enable_hashjoin; RESET enable_nestloop;
--- a join key is never detoasted in place, even when referenced again
+-- a join key is a reference like any other; the hash of the key and the
+-- comparisons on the inner side are computed from the stored datum, the
+-- WHERE references on the outer side share
 SET enable_nestloop = off; SET enable_mergejoin = off;
 SELECT count(*) FROM sd p JOIN sd2 q ON p.doc = q.doc WHERE p.doc ? 'a' AND p.doc @> '{"b": 2}';
 RESET enable_nestloop; RESET enable_mergejoin;
--- an ancestor reading a column the join projects bare still sees the stored
--- form, even though the join itself detoasts that column for its expressions
--- (the bare column comes last in the target list so that the projection would
--- pick up the detoasted value if the join had detoasted it in place)
+-- an ancestor reading a column the join projects bare sees the stored form
+-- (the bare column comes last in the target list, after the expressions
+-- that detoast it)
 SELECT pg_column_toast_chunk_id(d) IS NOT NULL AS pointer_kept, x
 FROM (SELECT (p.doc->>'a')::int + (p.doc->>'b')::int + (q.doc->>'a')::int AS x, p.doc AS d
       FROM sd p JOIN sd2 q ON p.id = q.id OFFSET 0) s;
--- an outer column passed down as a nestloop parameter keeps its pointer too,
--- since the inner side (Memoize) may keep the parameter as a cache key; both
--- with a parent that stores rows and with one that consumes them
+-- an outer column passed down as a nestloop parameter goes down as the
+-- stored pointer (Memoize keeps it as a cache key) while the outer quals
+-- share; both with a parent that stores rows and with one that does not
 CREATE INDEX sd2_doc_hash ON sd2 USING hash (doc);
 SET enable_hashjoin = off; SET enable_mergejoin = off; SET enable_seqscan = off;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM sd o JOIN sd2 q ON q.doc = o.doc WHERE o.doc ? 'a' AND o.doc @> '{"b": 2}';
@@ -131,33 +139,33 @@ SELECT count(*) FROM sd o JOIN sd2 q ON q.doc = o.doc WHERE o.doc ? 'a' AND o.do
 SELECT (q.doc->>'a')::int FROM sd o JOIN sd2 q ON q.doc = o.doc WHERE o.doc ? 'a' AND o.doc @> '{"b": 2}';
 RESET enable_hashjoin; RESET enable_mergejoin; RESET enable_seqscan;
 DROP TABLE sd2;
--- a scan without projection under a parent that copies the physical tuple
--- (Sort, hashed Agg over other columns) still detoasts once
+-- a scan without projection under a parent that stores its rows (Sort,
+-- hashed Agg) detoasts once; the parent copies the tuple, not the copy
 WITH s AS MATERIALIZED (SELECT * FROM sd WHERE doc ? 'a' AND doc @> '{"b": 2}' ORDER BY id)
 SELECT count(*) FROM s;
 SET enable_sort = off;
 EXPLAIN (VERBOSE, COSTS OFF) SELECT count(*) FROM sd WHERE doc ? 'a' AND doc @> '{"b": 2}' GROUP BY id;
 SELECT count(*) FROM sd WHERE doc ? 'a' AND doc @> '{"b": 2}' GROUP BY id;
--- but a hashed grouping column is copied out of the slot, so it is left alone
+-- a hashed grouping column is copied out of the slot as the stored pointer
+-- (its hash is computed from the stored datum, hence one more detoast)
 SELECT count(*) FROM sd WHERE doc ? 'a' AND doc @> '{"b": 2}' GROUP BY doc;
--- and so is any input column a hashed aggregate reads, since a spill copies
--- the needed columns by value out of the input slot: no Pre-detoast on the
--- scan, three detoasts
+-- an aggregated column the hashed Agg would spill by value is the stored
+-- pointer too: the scan shares its two references, the aggregate argument
+-- detoasts on its own
 EXPLAIN (VERBOSE, COSTS OFF) SELECT id, sum((doc->>'a')::int) FROM sd WHERE doc ? 'a' AND doc @> '{"b": 2}' GROUP BY id;
 SELECT id, sum((doc->>'a')::int) FROM sd WHERE doc ? 'a' AND doc @> '{"b": 2}' GROUP BY id;
 RESET enable_sort;
 -- aggregate arguments referencing the same input column detoast it once
 EXPLAIN (VERBOSE, COSTS OFF) SELECT sum((doc->>'a')::int), sum((doc->>'b')::int) FROM sd;
 SELECT sum((doc->>'a')::int), sum((doc->>'b')::int) FROM sd;
--- unless the column itself is an aggregate argument, whose state may keep it
+-- an aggregate taking the column whole gets the stored pointer, the others
+-- still share: one detoast
 SELECT sum((doc->>'a')::int), sum((doc->>'b')::int), count(doc) FROM sd;
--- a representation reader in an ancestor still sees the stored form: the
--- scan below keeps the toast pointer and detoasts per reference (bare column
--- last, see above)
+-- a function inspecting the stored form in an ancestor sees it (bare column
+-- last, see above): one detoast, pointer kept
 SELECT pg_column_toast_chunk_id(d) IS NOT NULL AS pointer_kept, a, b
 FROM (SELECT doc->'a' AS a, doc->'b' AS b, doc AS d FROM sd OFFSET 0) s;
--- the same through an Append, whose members hand their slots up unchanged:
--- the veto reaches the partition scans
+-- the same through an Append
 CREATE TABLE sdp (id int, doc jsonb) PARTITION BY RANGE (id);
 CREATE TABLE sdp1 PARTITION OF sdp FOR VALUES FROM (0) TO (10);
 CREATE TABLE sdp2 PARTITION OF sdp FOR VALUES FROM (10) TO (20);
@@ -166,34 +174,34 @@ INSERT INTO sdp SELECT i, doc FROM sd, (VALUES (1), (12)) v(i);
 VACUUM ANALYZE sdp;
 SELECT pg_column_toast_chunk_id(d) IS NOT NULL AS pointer_kept, a, b
 FROM (SELECT doc->'a' AS a, doc->'b' AS b, doc AS d FROM sdp OFFSET 0) s;
--- and a storing parent above an Append widens the partition scans as it
--- would a single scan: one detoast per row
+-- partition scans under a storing parent: one detoast per row
 EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM sdp WHERE doc ? 'a' AND doc @> '{"b": 2}' ORDER BY id;
 WITH s AS MATERIALIZED (SELECT * FROM sdp WHERE doc ? 'a' AND doc @> '{"b": 2}' ORDER BY id)
 SELECT count(*) FROM s;
 DROP TABLE sdp;
--- a column handed to a correlated subplan as a parameter keeps its stored
--- form as well, since the subplan may read it raw: two detoasts, pointer kept
+-- a column handed to a correlated subplan as a parameter goes down as the
+-- stored pointer: one detoast for the two quals, pointer kept inside
 SELECT (SELECT pg_column_toast_chunk_id(p.doc) IS NOT NULL) AS pointer_kept
 FROM sd p WHERE p.doc ? 'a' AND p.doc @> '{"b": 2}';
 -- a receiver that keeps the rows (here SPI, via a set-returning function) gets
--- toast pointers, not full values, so the scan detoasts per reference
+-- toast pointers, not full values, and the scan still shares
 CREATE FUNCTION sd_rows() RETURNS TABLE (d jsonb, a jsonb, b jsonb) LANGUAGE plpgsql AS $$
 BEGIN RETURN QUERY SELECT doc, doc->'a', doc->'b' FROM sd; END $$;
 SELECT pg_column_toast_chunk_id(d) IS NOT NULL AS pointer_kept, a, b FROM sd_rows();
 DROP FUNCTION sd_rows();
--- an aggregate that keeps its argument leaves the scan below it alone too
+-- an aggregate that keeps its argument keeps the stored pointer
 SELECT count(DISTINCT doc) FROM sd WHERE doc ? 'a' AND doc @> '{"b": 2}';
 -- a column handed on whole through RelabelType, CASE, COALESCE, GREATEST or
--- NULLIF is projected bare like a plain Var: an ancestor raw reader still sees
--- the pointer (two detoasts for the two LIKEs, none for the projection)
+-- NULLIF is projected like a plain Var: the pointer is kept and the other
+-- references share
 SELECT pg_column_toast_chunk_id(t) IS NOT NULL AS pointer_kept
 FROM (SELECT txt COLLATE "C" AS t FROM sd WHERE txt LIKE 'abc%' AND txt LIKE '%a6' OFFSET 0) s;
 SELECT pg_column_toast_chunk_id(d) IS NOT NULL AS pointer_kept
 FROM (SELECT CASE WHEN id > 0 THEN doc END AS d FROM sd WHERE doc ? 'a' AND doc ? 'b' OFFSET 0) s;
--- and under a Sort the pointer, not the detoasted value, is stored: two
--- detoasts in the scan, none for the null test outside
-SELECT a, b, d IS NOT NULL AS has_doc
+SELECT pg_column_toast_chunk_id(d) IS NOT NULL AS pointer_kept, pg_column_toast_chunk_id(n) IS NOT NULL AS pointer_kept2
+FROM (SELECT GREATEST(doc, '{}') AS d, NULLIF(doc, '{}') AS n FROM sd WHERE doc ? 'a' AND doc ? 'b' OFFSET 0) s;
+-- and under a Sort the pointer, not the copy, is stored
+SELECT a, b, pg_column_toast_chunk_id(d) IS NOT NULL AS pointer_kept
 FROM (SELECT doc->'a' AS a, doc->'b' AS b, COALESCE(doc, '{}') AS d FROM sd ORDER BY small->>'a') s;
 -- a holdable cursor is persisted through a receiver that detoasts anyway: the
 -- scan still detoasts once while the cursor is materialized at COMMIT
@@ -238,24 +246,22 @@ SET enable_nestloop = off; SET enable_mergejoin = off;
 SELECT s.id, q.doc->'a', q.doc->'b' FROM sd s LEFT JOIN sd3 q ON q.id = s.id + 5 ORDER BY s.id;
 SELECT s.id, q.doc->'a', q.doc->'b' FROM sd s LEFT JOIN sd3 q ON q.id = s.id ORDER BY s.id;
 RESET enable_nestloop; RESET enable_mergejoin;
--- statements that store the column keep a pointer.  INSERT ... SELECT projects
--- the column bare below a ModifyTable, so the WHERE references do not share;
--- CREATE TABLE AS is denied for the same reason, so that a compressed value is
--- copied into the new table as it is instead of being decompressed and
--- compressed again
+-- statements that store the column store the pointer while the WHERE
+-- references share: one detoast per row for INSERT ... SELECT and for
+-- CREATE TABLE AS
 CREATE TABLE sd4 (LIKE sd3);
 INSERT INTO sd4 SELECT id, doc, blob FROM sd3 WHERE doc ? 'a' AND doc ? 'b';
 SELECT pg_column_toast_chunk_id(doc) IS NOT NULL AS pointer_kept, id FROM sd4 ORDER BY id;
 CREATE TABLE sd5 AS SELECT id, doc FROM sd3 WHERE doc ? 'a' AND doc ? 'b';
 SELECT pg_column_toast_chunk_id(doc) IS NOT NULL AS pointer_kept, id FROM sd5 ORDER BY id;
--- an aggregate that keeps its argument whole excludes the column
+-- an aggregate that keeps its argument whole gets the stored pointer
 SELECT jsonb_agg(doc ORDER BY id) IS NOT NULL FROM sd3 WHERE doc ? 'a' AND doc ? 'b';
 -- window functions: the expressions are evaluated above the WindowAgg, which
 -- gets no set of its own, so the scan projects the column bare and nothing is
 -- shared (three detoasts per row)
 EXPLAIN (VERBOSE, COSTS OFF) SELECT doc->'a', doc->'b', count(*) OVER () FROM sd3 WHERE doc ? 'k1';
 SELECT doc->'a', doc->'b', count(*) OVER () FROM sd3 WHERE doc ? 'k1' ORDER BY 1;
--- grouping sets deny the aggregate set and the widening below it
+-- grouping sets: the scan below shares like under any other parent
 SELECT count(*) FROM sd3 WHERE doc ? 'a' AND doc ? 'b' GROUP BY GROUPING SETS ((id), ());
 -- a scrollable cursor rescans and reads backward: one detoast per fetched row
 BEGIN;

@@ -253,8 +253,7 @@ ExecInitProjectSet(ProjectSet *node, EState *estate, int eflags)
 	/*
 	 * initialize child nodes
 	 */
-	outerPlanState(state) = ExecInitNode(outerPlan(node), estate,
-										 EXEC_PASS_ROW_CONSUMER(eflags));
+	outerPlanState(state) = ExecInitNode(outerPlan(node), estate, eflags);
 
 	/*
 	 * we don't use inner plan

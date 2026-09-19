@@ -139,9 +139,14 @@ typedef struct TupleTableSlot
 											 * TTS_FLAG_OBEYS_NOT_NULL_CONSTRAINTS */
 
 	MemoryContext tts_mcxt;		/* slot itself is in this context */
-	MemoryContext tts_detoast_cxt;	/* detoasted copies of tts_values entries,
-									 * created on demand, reset whenever the
-									 * slot's values are invalidated */
+	MemoryContext tts_detoast_cxt;	/* holds tts_detoasted and the copies it
+									 * points to; created on demand, reset
+									 * whenever tts_values is invalidated */
+	Datum	   *tts_detoasted;	/* per attribute, a detoasted copy of the
+								 * tts_values entry, or 0; NULL until the
+								 * first copy of the current tuple is made.
+								 * tts_values itself always keeps the stored
+								 * datum. */
 	ItemPointerData tts_tid;	/* stored tuple's tid */
 	Oid			tts_tableOid;	/* table oid of tuple */
 } TupleTableSlot;
@@ -474,9 +479,9 @@ slot_is_current_xact_tuple(TupleTableSlot *slot)
 }
 
 /*
- * Release detoasted copies made by EEOP_*_VAR_TOAST steps.  Must be called
- * whenever the slot's tts_values are about to be invalidated, before any
- * pointer into that memory could be looked at again.
+ * Release the detoasted copies made by EEOP_*_VAR_TOAST steps.  Must be
+ * called whenever the slot's tts_values are about to be invalidated, before
+ * any pointer into that memory could be looked at again.
  */
 static inline void
 ExecSlotResetDetoast(TupleTableSlot *slot)

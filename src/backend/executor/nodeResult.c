@@ -206,8 +206,7 @@ ExecInitResult(Result *node, EState *estate, int eflags)
 	/*
 	 * initialize child nodes
 	 */
-	outerPlanState(resstate) = ExecInitNode(outerPlan(node), estate,
-											EXEC_PASS_ROW_CONSUMER(eflags));
+	outerPlanState(resstate) = ExecInitNode(outerPlan(node), estate, eflags);
 
 	/*
 	 * we don't use inner plan

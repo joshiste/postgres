@@ -64,6 +64,7 @@
 #include "utils/typcache.h"
 
 
+static bool tlist_matches_tupdesc(PlanState *ps, List *tlist, int varno, TupleDesc tupdesc);
 static void ShutdownExprContext(ExprContext *econtext, bool isCommit);
 static RTEPermissionInfo *GetResultRTEPermissionInfo(ResultRelInfo *relinfo, EState *estate);
 
@@ -630,7 +631,7 @@ ExecConditionalAssignProjectionInfo(PlanState *planstate, TupleDesc inputDesc,
 	}
 }
 
-bool
+static bool
 tlist_matches_tupdesc(PlanState *ps, List *tlist, int varno, TupleDesc tupdesc)
 {
 	int			numattrs = tupdesc->natts;

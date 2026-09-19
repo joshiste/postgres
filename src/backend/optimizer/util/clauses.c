@@ -6839,31 +6839,11 @@ typedef struct
 {
 	Index		varno;			/* only Vars of this varno count; 0 = any */
 	Bitmapset  *seen_once;		/* attnos seen in one detoasting position */
-	Bitmapset  *vetoed;			/* attnos inspected by a raw reader */
 	List	   *multi_vars;		/* one Var per attno seen in two or more */
 } pull_multi_detoast_context;
 
 static bool pull_multi_detoast_walker(Node *node,
 									  pull_multi_detoast_context *context);
-
-/*
- * Functions whose result depends on the stored representation of a varlena
- * argument.  A Var passed directly to one of these must keep its toast
- * pointer, so the attribute is excluded outright.
- */
-static bool
-func_reads_raw_representation(Oid funcid)
-{
-	switch (funcid)
-	{
-		case F_PG_COLUMN_SIZE:
-		case F_PG_COLUMN_COMPRESSION:
-		case F_PG_COLUMN_TOAST_CHUNK_ID:
-			return true;
-		default:
-			return false;
-	}
-}
 
 /*
  * Functions that read at most a prefix or the size of a varlena argument
@@ -6973,62 +6953,25 @@ pull_multi_detoast_walker(Node *node, pull_multi_detoast_context *context)
 			{
 				FuncExpr   *f = (FuncExpr *) node;
 
-				if (func_reads_raw_representation(f->funcid))
-				{
-					ListCell   *lc;
-
-					foreach(lc, f->args)
-					{
-						Var		   *var = strip_relabel_var((Node *) lfirst(lc),
-															context->varno);
-
-						if (var)
-							context->vetoed = bms_add_member(context->vetoed,
-															 var->varattno);
-						else
-							pull_multi_detoast_walker((Node *) lfirst(lc),
-													  context);
-					}
-					return false;
-				}
+				/*
+				 * Functions that inspect the stored form are compiled to
+				 * receive the stored datum (see ExecInitFunc), so like slice
+				 * readers they do not count as detoasting references.
+				 */
 				pull_multi_detoast_args(f->args,
+										!ExecFuncReadsStoredForm(f->funcid) &&
 										!func_reads_slice_or_size(f->funcid),
 										context);
 				return false;
 			}
 		case T_OpExpr:
 		case T_DistinctExpr:
-		case T_NullIfExpr:
 			pull_multi_detoast_args(((OpExpr *) node)->args, true, context);
 			return false;
 		case T_ScalarArrayOpExpr:
 			pull_multi_detoast_args(((ScalarArrayOpExpr *) node)->args, true,
 									context);
 			return false;
-		case T_SubPlan:
-			{
-				SubPlan    *subplan = (SubPlan *) node;
-				ListCell   *lc;
-
-				/*
-				 * A Var handed to a subplan as a parameter must keep its
-				 * stored form, like a nestloop parameter: the subplan may
-				 * read it raw or keep it, and neither is visible from here.
-				 */
-				foreach(lc, subplan->args)
-				{
-					Var		   *var = strip_relabel_var((Node *) lfirst(lc),
-														context->varno);
-
-					if (var)
-						context->vetoed = bms_add_member(context->vetoed,
-														 var->varattno);
-					else
-						pull_multi_detoast_walker((Node *) lfirst(lc), context);
-				}
-				pull_multi_detoast_walker(subplan->testexpr, context);
-				return false;
-			}
 		case T_CoerceViaIO:
 			pull_multi_detoast_count((Node *) ((CoerceViaIO *) node)->arg,
 									 context);
@@ -7056,12 +6999,6 @@ pull_multi_detoast_walker(Node *node, pull_multi_detoast_context *context)
 										  context);
 				return false;
 			}
-		case T_MinMaxExpr:
-			pull_multi_detoast_args(((MinMaxExpr *) node)->args, true, context);
-			return false;
-		case T_RowExpr:
-			pull_multi_detoast_args(((RowExpr *) node)->args, true, context);
-			return false;
 		case T_ArrayExpr:
 			pull_multi_detoast_args(((ArrayExpr *) node)->elements, true,
 									context);
@@ -7075,128 +7012,14 @@ pull_multi_detoast_walker(Node *node, pull_multi_detoast_context *context)
 		default:
 
 			/*
-			 * Everything else (CASE, COALESCE, boolean operators, NullTest,
-			 * TargetEntry, ...) hands the datum on without looking inside it;
-			 * only what it feeds into can detoast.
+			 * Everything else (CASE, COALESCE, GREATEST/LEAST, NULLIF, ROW(),
+			 * boolean operators, NullTest, TargetEntry, ...) hands the datum
+			 * on without looking inside it, or returns it unchanged; only
+			 * what it feeds into can detoast.  This list of positions must
+			 * match the ones ExecInitDetoastArg is used for in execExpr.c.
 			 */
 			return expression_tree_walker(node, pull_multi_detoast_walker,
 										  context);
-	}
-}
-
-/*
- * pull_raw_reader_attrs
- *		Add to attrs the attribute numbers of Vars with the given varno that
- *		expressions under node pass directly to a function reading the stored
- *		representation.
- */
-typedef struct
-{
-	Index		varno;
-	Bitmapset  *attrs;
-} pull_raw_reader_context;
-
-static bool
-pull_raw_reader_walker(Node *node, pull_raw_reader_context *context)
-{
-	List	   *args = NIL;
-	ListCell   *lc;
-
-	if (node == NULL)
-		return false;
-	/* a subplan parameter may be read raw inside the subplan */
-	if (IsA(node, FuncExpr) &&
-		func_reads_raw_representation(((FuncExpr *) node)->funcid))
-		args = ((FuncExpr *) node)->args;
-	else if (IsA(node, SubPlan))
-		args = ((SubPlan *) node)->args;
-	foreach(lc, args)
-	{
-		Var		   *var = strip_relabel_var((Node *) lfirst(lc), context->varno);
-
-		if (var)
-			context->attrs = bms_add_member(context->attrs, var->varattno);
-	}
-	return expression_tree_walker(node, pull_raw_reader_walker, context);
-}
-
-Bitmapset *
-pull_raw_reader_attrs(Node *node, Index varno, Bitmapset *attrs)
-{
-	pull_raw_reader_context context;
-
-	context.varno = varno;
-	context.attrs = attrs;
-	pull_raw_reader_walker(node, &context);
-	return context.attrs;
-}
-
-/*
- * pull_passthrough_attrs
- *		Add to attrs the attribute numbers of Vars with the given varno that
- *		expr can return whole, without detoasting them.
- *
- * A Var at the root of a targetlist expression passes its datum along
- * unchanged, and so does one below nodes that merely relabel or select
- * among their inputs: RelabelType, CoerceToDomain, CASE results, COALESCE,
- * GREATEST/LEAST and the first argument of NULLIF.  The executor compiles
- * such a Var to the same step as a bare one, so a detoasted value would be
- * projected in place of the stored pointer; callers exclude these
- * attributes wherever a bare Var is excluded.
- */
-Bitmapset *
-pull_passthrough_attrs(Node *expr, Index varno, Bitmapset *attrs)
-{
-	for (;;)
-	{
-		if (expr == NULL)
-			return attrs;
-		switch (nodeTag(expr))
-		{
-			case T_Var:
-				{
-					Var		   *var = (Var *) expr;
-
-					if (var->varattno > 0 &&
-						(varno == 0 || var->varno == varno))
-						attrs = bms_add_member(attrs, var->varattno);
-					return attrs;
-				}
-			case T_RelabelType:
-				expr = (Node *) ((RelabelType *) expr)->arg;
-				break;
-			case T_CoerceToDomain:
-				expr = (Node *) ((CoerceToDomain *) expr)->arg;
-				break;
-			case T_CaseExpr:
-				{
-					CaseExpr   *caseexpr = (CaseExpr *) expr;
-
-					foreach_node(CaseWhen, when, caseexpr->args)
-						attrs = pull_passthrough_attrs((Node *) when->result,
-													   varno, attrs);
-					expr = (Node *) caseexpr->defresult;
-					break;
-				}
-			case T_CoalesceExpr:
-			case T_MinMaxExpr:
-				{
-					List	   *args = IsA(expr, CoalesceExpr) ?
-						((CoalesceExpr *) expr)->args :
-						((MinMaxExpr *) expr)->args;
-					ListCell   *lc;
-
-					foreach(lc, args)
-						attrs = pull_passthrough_attrs((Node *) lfirst(lc),
-													   varno, attrs);
-					return attrs;
-				}
-			case T_NullIfExpr:
-				expr = (Node *) linitial(((NullIfExpr *) expr)->args);
-				break;
-			default:
-				return attrs;
-		}
 	}
 }
 
@@ -7206,39 +7029,28 @@ pull_passthrough_attrs(Node *expr, Index varno, Bitmapset *attrs)
  *		targetlist and qual would detoast.
  *
  * A reference counts when the Var is a direct argument of a function-like
- * node that reads the whole value: function and operator calls, casts
- * through I/O functions, field and subscript access, row and array
- * construction.  Bare Vars in the targetlist, and Vars passed to functions
- * known to read only a slice or the size of their argument, do not count.
- * Vars passed to a function that inspects the stored representation are
- * excluded even if referenced elsewhere.  Only Vars with the given varno
- * count (0 means any, for scan nodes; OUTER_VAR or INNER_VAR for joins).
- * Returns one Var per attribute number; the caller checks toastability.
+ * node that reads the whole value and does not return it: function and
+ * operator calls, casts through I/O functions, field and subscript access,
+ * array construction and row comparison.  Bare Vars, Vars under constructs
+ * that may return them unchanged (CASE, COALESCE, GREATEST/LEAST, NULLIF),
+ * and Vars passed to functions known to read only a slice or the size of
+ * their argument, or to a function that inspects the stored form, do not
+ * count either.  Only Vars with the given varno count (0 means any, for scan
+ * nodes; OUTER_VAR or INNER_VAR for joins and aggregates).  Returns one Var
+ * per attribute number; the caller checks toastability.
  */
 List *
 pull_multi_detoast_vars(List *targetlist, List *qual, Index varno)
 {
 	pull_multi_detoast_context context;
-	List	   *result = NIL;
-	ListCell   *lc;
 
 	context.varno = varno;
 	context.seen_once = NULL;
-	context.vetoed = NULL;
 	context.multi_vars = NIL;
 
 	pull_multi_detoast_walker((Node *) targetlist, &context);
 	pull_multi_detoast_walker((Node *) qual, &context);
 
-	foreach(lc, context.multi_vars)
-	{
-		Var		   *var = (Var *) lfirst(lc);
-
-		if (!bms_is_member(var->varattno, context.vetoed))
-			result = lappend(result, var);
-	}
 	bms_free(context.seen_once);
-	bms_free(context.vetoed);
-	list_free(context.multi_vars);
-	return result;
+	return context.multi_vars;
 }
