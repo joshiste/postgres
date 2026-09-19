@@ -417,14 +417,12 @@ SELECT count(*) FROM sd o JOIN sd2 q ON q.doc = o.doc WHERE o.doc ? 'a' AND o.do
 NOTICE:  notice triggered for injection point detoast-attr-external
 NOTICE:  notice triggered for injection point detoast-attr-external
 NOTICE:  notice triggered for injection point detoast-attr-external
-NOTICE:  notice triggered for injection point detoast-attr-external
  count 
 -------
      1
 (1 row)
 
 SELECT (q.doc->>'a')::int FROM sd o JOIN sd2 q ON q.doc = o.doc WHERE o.doc ? 'a' AND o.doc @> '{"b": 2}';
-NOTICE:  notice triggered for injection point detoast-attr-external
 NOTICE:  notice triggered for injection point detoast-attr-external
 NOTICE:  notice triggered for injection point detoast-attr-external
 NOTICE:  notice triggered for injection point detoast-attr-external
@@ -590,6 +588,65 @@ NOTICE:  notice triggered for injection point detoast-attr-external
  pointer_kept 
 --------------
  t
+(1 row)
+
+-- but a subplan reading the parameter as a function argument finds the
+-- outer row's copy: one detoast for the outer quals and the subplan together
+EXPLAIN (VERBOSE, COSTS OFF) SELECT count(*) FROM sd p WHERE p.doc ? 'a' AND p.doc @> '{"b": 2}' AND EXISTS (SELECT 1 FROM jsonb_each_text(p.doc) e WHERE e.value = '1');
+                                             QUERY PLAN                                              
+-----------------------------------------------------------------------------------------------------
+ Aggregate
+   Output: count(*)
+   ->  Seq Scan on public.sd p
+         Output: p.id, p.doc, p.small, p.txt, p.ctxt
+         Filter: ((p.doc ? 'a'::text) AND (p.doc @> '{"b": 2}'::jsonb) AND EXISTS(SubPlan exists_1))
+         Pre-detoast: p.doc
+         SubPlan exists_1
+           ->  Function Scan on pg_catalog.jsonb_each_text e
+                 Function Call: jsonb_each_text(p.doc)
+                 Filter: (e.value = '1'::text)
+(10 rows)
+
+SELECT count(*) FROM sd p WHERE p.doc ? 'a' AND p.doc @> '{"b": 2}' AND EXISTS (SELECT 1 FROM jsonb_each_text(p.doc) e WHERE e.value = '1');
+NOTICE:  notice triggered for injection point detoast-attr-external
+ count 
+-------
+     1
+(1 row)
+
+-- a subplan reading the parameter once per inner row makes the copy itself
+-- and detoasts once per outer row, not per inner row
+SELECT count(*) FROM sd p WHERE EXISTS (SELECT 1 FROM generate_series(1, 3) g WHERE p.doc ? ('k' || g));
+NOTICE:  notice triggered for injection point detoast-attr-external
+ count 
+-------
+     1
+(1 row)
+
+-- the same for a nestloop parameter
+EXPLAIN (VERBOSE, COSTS OFF) SELECT count(*) FROM sd o, LATERAL (SELECT count(*) FROM generate_series(1, 3) g WHERE o.doc ? ('k' || g) AND o.doc @> '{"b": 2}') s;
+                               QUERY PLAN                               
+------------------------------------------------------------------------
+ Aggregate
+   Output: count(*)
+   ->  Nested Loop
+         ->  Seq Scan on public.sd o
+               Output: o.id, o.doc, o.small, o.txt, o.ctxt
+         ->  Aggregate
+               Output: NULL::bigint
+               ->  Result
+                     One-Time Filter: (o.doc @> '{"b": 2}'::jsonb)
+                     ->  Function Scan on pg_catalog.generate_series g
+                           Output: g.g
+                           Function Call: generate_series(1, 3)
+                           Filter: (o.doc ? ('k'::text || (g.g)::text))
+(13 rows)
+
+SELECT count(*) FROM sd o, LATERAL (SELECT count(*) FROM generate_series(1, 3) g WHERE o.doc ? ('k' || g) AND o.doc @> '{"b": 2}') s;
+NOTICE:  notice triggered for injection point detoast-attr-external
+ count 
+-------
+     1
 (1 row)
 
 -- a receiver that keeps the rows (here SPI, via a set-returning function) gets

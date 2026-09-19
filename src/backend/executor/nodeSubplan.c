@@ -1172,6 +1172,7 @@ ExecSetParamPlan(SubPlanState *node, ExprContext *econtext)
 			prm->execPlan = NULL;
 			prm->value = BoolGetDatum(true);
 			prm->isnull = false;
+			prm->detoast_slot = NULL;
 			found = true;
 			break;
 		}
@@ -1222,6 +1223,7 @@ ExecSetParamPlan(SubPlanState *node, ExprContext *econtext)
 			prm->execPlan = NULL;
 			prm->value = heap_getattr(node->curTuple, i, tdesc,
 									  &(prm->isnull));
+			prm->detoast_slot = NULL;
 			i++;
 		}
 	}
@@ -1245,6 +1247,7 @@ ExecSetParamPlan(SubPlanState *node, ExprContext *econtext)
 		prm->execPlan = NULL;
 		prm->value = node->curArray;
 		prm->isnull = false;
+		prm->detoast_slot = NULL;
 	}
 	else if (!found)
 	{
@@ -1257,6 +1260,7 @@ ExecSetParamPlan(SubPlanState *node, ExprContext *econtext)
 			prm->execPlan = NULL;
 			prm->value = BoolGetDatum(false);
 			prm->isnull = false;
+			prm->detoast_slot = NULL;
 		}
 		else
 		{
@@ -1269,6 +1273,7 @@ ExecSetParamPlan(SubPlanState *node, ExprContext *econtext)
 				prm->execPlan = NULL;
 				prm->value = (Datum) 0;
 				prm->isnull = true;
+				prm->detoast_slot = NULL;
 			}
 		}
 	}

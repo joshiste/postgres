@@ -112,21 +112,23 @@ static void ExecInitJsonCoercion(ExprState *state, JsonReturning *returning,
 /*
  * Prepare evaluation of an argument whose whole value the consuming step
  * reads.  On a node without attributes to detoast once per row, the common
- * case, this is ExecInitExprRec; otherwise ExecInitDetoastedVar checks
- * whether the argument is a plain Var of such an attribute.
+ * case, this is ExecInitExprRec unless the argument may be a parameter;
+ * otherwise ExecInitDetoastedVar checks whether the argument is a plain Var
+ * of such an attribute or a parameter carrying a column value.
  */
 static inline void
 ExecInitDetoastArg(Expr *arg, ExprState *state, Datum *resv, bool *resnull)
 {
 	PlanState  *parent = state->parent;
 
-	if (parent == NULL ||
-		(parent->ps_predetoast_scanattrs == NULL &&
-		 parent->ps_predetoast_outerattrs == NULL &&
-		 parent->ps_predetoast_innerattrs == NULL))
-		ExecInitExprRec(arg, state, resv, resnull);
-	else
+	if (IsA(arg, Param) || IsA(arg, RelabelType) ||
+		(parent != NULL &&
+		 (parent->ps_predetoast_scanattrs != NULL ||
+		  parent->ps_predetoast_outerattrs != NULL ||
+		  parent->ps_predetoast_innerattrs != NULL)))
 		ExecInitDetoastedVar(arg, state, resv, resnull);
+	else
+		ExecInitExprRec(arg, state, resv, resnull);
 }
 
 
@@ -169,6 +171,26 @@ ExprState *
 ExecInitExpr(Expr *node, PlanState *parent)
 {
 	return ExecInitExprInternal(node, parent, false);
+}
+
+/*
+ * ExecInitExprArgList: ExecInitExprList for expressions consumed as function
+ * arguments (the arguments of a set-returning function call).
+ */
+List *
+ExecInitExprArgList(List *nodes, PlanState *parent)
+{
+	List	   *result = NIL;
+	ListCell   *lc;
+
+	foreach(lc, nodes)
+	{
+		Expr	   *e = lfirst(lc);
+
+		result = lappend(result, ExecInitExprArg(e, parent));
+	}
+
+	return result;
 }
 
 /*
@@ -2778,15 +2800,16 @@ ExecFuncReadsStoredForm(Oid funcid)
 }
 
 /*
- * Out-of-line part of ExecInitDetoastArg, for nodes that detoast something.
- * A plain Var (possibly relabeled) of an attribute the node detoasts once
- * per row is compiled to the corresponding EEOP_*_VAR_TOAST step, which
- * hands out the copy kept beside the slot; everything else, and every Var in
- * any other position, goes through ExecInitExprRec and sees the slot's own
- * datum.  Restricting the step to argument positions is what keeps a
- * detoasted copy from ever becoming an expression result: the constructs
- * that return an input unchanged (bare Vars, RelabelType, CASE, COALESCE,
- * GREATEST/LEAST, NULLIF) never get one.
+ * Out-of-line part of ExecInitDetoastArg.  A plain Var (possibly relabeled)
+ * of an attribute the node detoasts once per row is compiled to the
+ * corresponding EEOP_*_VAR_TOAST step, which hands out the copy kept beside
+ * the slot, and a varlena PARAM_EXEC parameter to EEOP_PARAM_EXEC_TOAST,
+ * which does the same for a parameter set from a slot column; everything
+ * else, and every Var or Param in any other position, goes through
+ * ExecInitExprRec and sees the stored datum.  Restricting the steps to
+ * argument positions is what keeps a detoasted copy from ever becoming an
+ * expression result: the constructs that return an input unchanged (bare
+ * Vars, RelabelType, CASE, COALESCE, GREATEST/LEAST, NULLIF) never get one.
  */
 static void
 ExecInitDetoastedVar(Expr *arg, ExprState *state, Datum *resv, bool *resnull)
@@ -2799,7 +2822,25 @@ ExecInitDetoastedVar(Expr *arg, ExprState *state, Datum *resv, bool *resnull)
 
 	while (IsA(expr, RelabelType))
 		expr = ((RelabelType *) expr)->arg;
-	if (!IsA(expr, Var))
+	if (IsA(expr, Param))
+	{
+		Param	   *param = (Param *) expr;
+
+		if (param->paramkind != PARAM_EXEC ||
+			get_typlen(param->paramtype) != -1)
+		{
+			ExecInitExprRec(arg, state, resv, resnull);
+			return;
+		}
+		scratch.opcode = EEOP_PARAM_EXEC_TOAST;
+		scratch.resvalue = resv;
+		scratch.resnull = resnull;
+		scratch.d.param.paramid = param->paramid;
+		scratch.d.param.paramtype = param->paramtype;
+		ExprEvalPushStep(state, &scratch);
+		return;
+	}
+	if (!IsA(expr, Var) || parent == NULL)
 	{
 		ExecInitExprRec(arg, state, resv, resnull);
 		return;
@@ -2995,6 +3036,7 @@ ExecInitSubPlanExpr(SubPlan *subplan,
 	{
 		int			paramid = lfirst_int(l);
 		Expr	   *arg = (Expr *) lfirst(pvar);
+		Expr	   *src = arg;
 
 		ExecInitExprRec(arg, state, resv, resnull);
 
@@ -3004,6 +3046,22 @@ ExecInitSubPlanExpr(SubPlan *subplan,
 		scratch.d.param.paramid = paramid;
 		/* paramtype's not actually used, but we might as well fill it */
 		scratch.d.param.paramtype = exprType((Node *) arg);
+
+		/*
+		 * A plain column value may have a detoasted copy beside its slot;
+		 * tell the step where, so that argument positions in the subplan can
+		 * use it (see ExecEvalParamExecToast).
+		 */
+		scratch.d.param.srcattnum = 0;
+		scratch.d.param.srcvarno = 0;
+		while (IsA(src, RelabelType))
+			src = ((RelabelType *) src)->arg;
+		if (IsA(src, Var) && ((Var *) src)->varattno > 0 &&
+			((Var *) src)->varreturningtype == VAR_RETURNING_DEFAULT)
+		{
+			scratch.d.param.srcattnum = ((Var *) src)->varattno;
+			scratch.d.param.srcvarno = ((Var *) src)->varno;
+		}
 		ExprEvalPushStep(state, &scratch);
 	}
 

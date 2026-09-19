@@ -542,6 +542,7 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		&&CASE_EEOP_BOOLTEST_IS_FALSE,
 		&&CASE_EEOP_BOOLTEST_IS_NOT_FALSE,
 		&&CASE_EEOP_PARAM_EXEC,
+		&&CASE_EEOP_PARAM_EXEC_TOAST,
 		&&CASE_EEOP_PARAM_EXTERN,
 		&&CASE_EEOP_PARAM_CALLBACK,
 		&&CASE_EEOP_PARAM_SET,
@@ -1401,6 +1402,13 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		{
 			/* out of line implementation: too large */
 			ExecEvalParamExec(state, op, econtext);
+
+			EEO_NEXT();
+		}
+
+		EEO_CASE(EEOP_PARAM_EXEC_TOAST)
+		{
+			ExecEvalParamExecToast(state, op, econtext);
 
 			EEO_NEXT();
 		}
@@ -3210,6 +3218,25 @@ ExecEvalParamSet(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
 
 	prm->value = *op->resvalue;
 	prm->isnull = *op->resnull;
+
+	/* remember where a detoasted copy of a plain Var's value may be kept */
+	prm->detoast_slot = NULL;
+	if (op->d.param.srcattnum > 0)
+	{
+		switch (op->d.param.srcvarno)
+		{
+			case INNER_VAR:
+				prm->detoast_slot = econtext->ecxt_innertuple;
+				break;
+			case OUTER_VAR:
+				prm->detoast_slot = econtext->ecxt_outertuple;
+				break;
+			default:
+				prm->detoast_slot = econtext->ecxt_scantuple;
+				break;
+		}
+		prm->detoast_attnum = op->d.param.srcattnum;
+	}
 }
 
 /*
@@ -5795,6 +5822,61 @@ ExecEvalVarToast(ExprState *state, ExprEvalStep *op, ExprContext *econtext,
 		}
 	}
 	*op->resvalue = value;
+}
+
+/*
+ * Evaluate a PARAM_EXEC parameter in an argument position, using the
+ * detoasted copy of its value if the parameter came from a slot column.
+ *
+ * The parameter keeps the stored datum; the copy lives in the source slot's
+ * side array, made here on first use if the slot's own expressions did not
+ * make it, and reused by later references in the outer node and by later
+ * executions of the subplan or inner plan for the same outer row.  The
+ * reference is only followed while the slot still holds that datum, so a
+ * stale reference can at worst miss the copy.
+ */
+void
+ExecEvalParamExecToast(ExprState *state, ExprEvalStep *op,
+					   ExprContext *econtext)
+{
+	ParamExecData *prm;
+	TupleTableSlot *slot;
+	int			attnum;
+	varlena    *attr;
+
+	prm = &(econtext->ecxt_param_exec_vals[op->d.param.paramid]);
+	if (unlikely(prm->execPlan != NULL))
+	{
+		/* Parameter not evaluated yet, so go do it */
+		ExecSetParamPlan(prm->execPlan, econtext);
+		/* ExecSetParamPlan should have processed this param... */
+		Assert(prm->execPlan == NULL);
+	}
+	*op->resvalue = prm->value;
+	*op->resnull = prm->isnull;
+
+	slot = prm->detoast_slot;
+	if (prm->isnull || slot == NULL)
+		return;
+	attnum = prm->detoast_attnum - 1;
+	if (attnum >= slot->tts_nvalid || slot->tts_isnull[attnum] ||
+		slot->tts_values[attnum] != prm->value)
+		return;
+	attr = (varlena *) DatumGetPointer(prm->value);
+	if (VARATT_IS_EXTERNAL_ONDISK(attr) || VARATT_IS_COMPRESSED(attr))
+	{
+		Datum	   *detoasted = slot_detoasted_array(slot);
+
+		if (detoasted[attnum] == (Datum) 0)
+		{
+			MemoryContext oldcxt;
+
+			oldcxt = MemoryContextSwitchTo(slot->tts_detoast_cxt);
+			detoasted[attnum] = PointerGetDatum(detoast_attr(attr));
+			MemoryContextSwitchTo(oldcxt);
+		}
+		*op->resvalue = detoasted[attnum];
+	}
 }
 
 /*

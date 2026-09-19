@@ -198,6 +198,16 @@ DROP TABLE sdp;
 -- stored pointer: one detoast for the two quals, pointer kept inside
 SELECT (SELECT pg_column_toast_chunk_id(p.doc) IS NOT NULL) AS pointer_kept
 FROM sd p WHERE p.doc ? 'a' AND p.doc @> '{"b": 2}';
+-- but a subplan reading the parameter as a function argument finds the
+-- outer row's copy: one detoast for the outer quals and the subplan together
+EXPLAIN (VERBOSE, COSTS OFF) SELECT count(*) FROM sd p WHERE p.doc ? 'a' AND p.doc @> '{"b": 2}' AND EXISTS (SELECT 1 FROM jsonb_each_text(p.doc) e WHERE e.value = '1');
+SELECT count(*) FROM sd p WHERE p.doc ? 'a' AND p.doc @> '{"b": 2}' AND EXISTS (SELECT 1 FROM jsonb_each_text(p.doc) e WHERE e.value = '1');
+-- a subplan reading the parameter once per inner row makes the copy itself
+-- and detoasts once per outer row, not per inner row
+SELECT count(*) FROM sd p WHERE EXISTS (SELECT 1 FROM generate_series(1, 3) g WHERE p.doc ? ('k' || g));
+-- the same for a nestloop parameter
+EXPLAIN (VERBOSE, COSTS OFF) SELECT count(*) FROM sd o, LATERAL (SELECT count(*) FROM generate_series(1, 3) g WHERE o.doc ? ('k' || g) AND o.doc @> '{"b": 2}') s;
+SELECT count(*) FROM sd o, LATERAL (SELECT count(*) FROM generate_series(1, 3) g WHERE o.doc ? ('k' || g) AND o.doc @> '{"b": 2}') s;
 -- a receiver that keeps the rows (here SPI, via a set-returning function) gets
 -- toast pointers, not full values, and the scan still shares
 CREATE FUNCTION sd_rows() RETURNS TABLE (d jsonb, a jsonb, b jsonb) LANGUAGE plpgsql AS $$

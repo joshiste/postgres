@@ -1228,6 +1228,12 @@ llvm_compile_expr(ExprState *state)
 				LLVMBuildBr(b, opblocks[opno + 1]);
 				break;
 
+			case EEOP_PARAM_EXEC_TOAST:
+				build_EvalXFunc(b, mod, "ExecEvalParamExecToast",
+								v_state, op, v_econtext);
+				LLVMBuildBr(b, opblocks[opno + 1]);
+				break;
+
 			case EEOP_PARAM_EXTERN:
 				build_EvalXFunc(b, mod, "ExecEvalParamExtern",
 								v_state, op, v_econtext);
