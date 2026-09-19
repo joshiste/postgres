@@ -139,11 +139,27 @@ typedef struct TupleTableSlot
 											 * TTS_FLAG_OBEYS_NOT_NULL_CONSTRAINTS */
 
 	MemoryContext tts_mcxt;		/* slot itself is in this context */
+	MemoryContext tts_detoast_cxt;	/* holds tts_detoasted and the copies it
+									 * points to; created on demand, reset
+									 * whenever tts_values is invalidated */
+	Datum	   *tts_detoasted;	/* per attribute, a detoasted copy of the
+								 * tts_values entry, or 0; NULL until the
+								 * first copy of the current tuple is made.
+								 * tts_values itself always keeps the stored
+								 * datum. */
 	ItemPointerData tts_tid;	/* stored tuple's tid */
 	Oid			tts_tableOid;	/* table oid of tuple */
 } TupleTableSlot;
 
 /* routines for a TupleTableSlot implementation */
+/*
+ * Every implementation must call ExecSlotResetDetoast() whenever it is about
+ * to invalidate the slot's tts_values by other means than clear(), that is
+ * in any function that stores a new tuple, copies another slot in, or
+ * materializes the contents; see the in-tree implementations.  Otherwise a
+ * detoasted copy of the previous tuple's value (tts_detoasted) could be
+ * handed out for the new one.
+ */
 struct TupleTableSlotOps
 {
 	/* Minimum size of the slot */
@@ -355,6 +371,7 @@ extern TupleTableSlot *ExecStoreMinimalTuple(MinimalTuple mtup,
 extern void ExecForceStoreMinimalTuple(MinimalTuple mtup, TupleTableSlot *slot,
 									   bool shouldFree);
 extern TupleTableSlot *ExecStoreVirtualTuple(TupleTableSlot *slot);
+extern void ExecResetSlotDetoastContext(TupleTableSlot *slot);
 extern TupleTableSlot *ExecStoreAllNullTuple(TupleTableSlot *slot);
 extern void ExecStoreHeapTupleDatum(Datum data, TupleTableSlot *slot);
 extern HeapTuple ExecFetchSlotHeapTuple(TupleTableSlot *slot, bool materialize, bool *shouldFree);
@@ -470,11 +487,26 @@ slot_is_current_xact_tuple(TupleTableSlot *slot)
 }
 
 /*
+ * Release the detoasted copies made by EEOP_*_VAR_TOAST steps or carried in
+ * by EEOP_ASSIGN_*_VAR_TOAST.  The slot implementations call this whenever
+ * the slot's tts_values are about to be invalidated (every store, clear and
+ * materialize path), before any pointer into that memory could be looked at
+ * again.
+ */
+static inline void
+ExecSlotResetDetoast(TupleTableSlot *slot)
+{
+	if (unlikely(slot->tts_detoast_cxt != NULL))
+		ExecResetSlotDetoastContext(slot);
+}
+
+/*
  * ExecClearTuple - clear the slot's contents
  */
 static inline TupleTableSlot *
 ExecClearTuple(TupleTableSlot *slot)
 {
+	ExecSlotResetDetoast(slot);
 	slot->tts_ops->clear(slot);
 
 	return slot;
@@ -494,6 +526,7 @@ ExecClearTuple(TupleTableSlot *slot)
 static inline void
 ExecMaterializeSlot(TupleTableSlot *slot)
 {
+	ExecSlotResetDetoast(slot);
 	slot->tts_ops->materialize(slot);
 }
 
@@ -548,6 +581,7 @@ ExecCopySlot(TupleTableSlot *dstslot, TupleTableSlot *srcslot)
 	Assert(dstslot->tts_tupleDescriptor->natts ==
 		   srcslot->tts_tupleDescriptor->natts);
 
+	ExecSlotResetDetoast(dstslot);
 	dstslot->tts_ops->copyslot(dstslot, srcslot);
 
 	return dstslot;

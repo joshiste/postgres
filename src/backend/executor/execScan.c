@@ -154,3 +154,6 @@ ExecScanReScan(ScanState *node)
 		}
 	}
 }
+
+/* Detoast a toasted column once per row when several expressions reference it */
+bool		shared_detoast = true;

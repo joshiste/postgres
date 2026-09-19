@@ -540,7 +540,47 @@ typedef struct Scan
 	Plan		plan;
 	/* relid is index into the range table */
 	Index		scanrelid;
+
+	/*
+	 * Toastable scan-slot attributes that several of this node's expressions
+	 * pass whole to functions, which the executor therefore detoasts once per
+	 * row, keeping the copy beside the scan slot (see
+	 * set_scan_predetoast_attrs and ExecInitDetoastArg).
+	 */
+	Bitmapset  *predetoast_attrs;
 } Scan;
+
+/*
+ * Is this plan node a Scan (or a type derived from Scan)?  Executor states
+ * of several non-scan nodes (Agg, Sort, Material, ...) embed a ScanState, so
+ * code reached through one cannot assume the plan is a Scan without asking.
+ */
+static inline bool
+IsScanPlan(const Plan *plan)
+{
+	switch (nodeTag(plan))
+	{
+		case T_SeqScan:
+		case T_SampleScan:
+		case T_IndexScan:
+		case T_IndexOnlyScan:
+		case T_BitmapHeapScan:
+		case T_TidScan:
+		case T_TidRangeScan:
+		case T_SubqueryScan:
+		case T_FunctionScan:
+		case T_TableFuncScan:
+		case T_ValuesScan:
+		case T_CteScan:
+		case T_NamedTuplestoreScan:
+		case T_WorkTableScan:
+		case T_ForeignScan:
+		case T_CustomScan:
+			return true;
+		default:
+			return false;
+	}
+}
 
 /* ----------------
  *		sequential scan node
@@ -950,6 +990,31 @@ typedef struct CustomScan
 	 */
 	const struct CustomScanMethods *methods;
 } CustomScan;
+
+/*
+ * Does this scan's targetlist refer to the scan tuple through INDEX_VAR?
+ * That is the case when the scan tuple has a shape of its own rather than
+ * the table's: index-only scans, and foreign or custom scans with a scan
+ * targetlist (always so when scanrelid is 0, since there is no table).  The
+ * executor picks the projection varno by the same rule.
+ */
+static inline bool
+ScanUsesIndexVar(const Plan *plan)
+{
+	switch (nodeTag(plan))
+	{
+		case T_IndexOnlyScan:
+			return true;
+		case T_ForeignScan:
+			return ((const ForeignScan *) plan)->fdw_scan_tlist != NIL ||
+				((const Scan *) plan)->scanrelid == 0;
+		case T_CustomScan:
+			return ((const CustomScan *) plan)->custom_scan_tlist != NIL ||
+				((const Scan *) plan)->scanrelid == 0;
+		default:
+			return false;
+	}
+}
 
 /*
  * ==========

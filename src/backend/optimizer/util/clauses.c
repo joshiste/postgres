@@ -6829,3 +6829,230 @@ make_SAOP_expr(Oid oper, Node *leftexpr, Oid coltype, Oid arraycollid,
 
 	return saopexpr;
 }
+
+
+/*****************************************************************************
+ *		Detoasting references to scan-slot Vars
+ *****************************************************************************/
+
+typedef struct
+{
+	Index		varno;			/* only Vars of this varno count; 0 = any */
+	Bitmapset  *seen_once;		/* attnos seen in one detoasting position */
+	List	   *multi_vars;		/* one Var per attno seen in two or more */
+} pull_multi_detoast_context;
+
+static bool pull_multi_detoast_walker(Node *node,
+									  pull_multi_detoast_context *context);
+
+/*
+ * Functions that read at most a prefix or the size of a varlena argument
+ * (pg_detoast_datum_slice, toast_raw_datum_size) rather than the whole
+ * value.  A Var passed directly to one of these is not a detoasting
+ * reference.  length(text) is not among them: it counts characters, which
+ * needs the whole value in a multibyte encoding.
+ */
+static bool
+func_reads_slice_or_size(Oid funcid)
+{
+	switch (funcid)
+	{
+		case F_SUBSTR_TEXT_INT4:
+		case F_SUBSTR_TEXT_INT4_INT4:
+		case F_SUBSTRING_TEXT_INT4:
+		case F_SUBSTRING_TEXT_INT4_INT4:
+		case F_SUBSTR_BYTEA_INT4:
+		case F_SUBSTR_BYTEA_INT4_INT4:
+		case F_SUBSTRING_BYTEA_INT4:
+		case F_SUBSTRING_BYTEA_INT4_INT4:
+		case F_STARTS_WITH:
+		case F_LEFT:
+		case F_RIGHT:
+		case F_OVERLAY_TEXT_TEXT_INT4:
+		case F_OVERLAY_TEXT_TEXT_INT4_INT4:
+		case F_OVERLAY_BYTEA_BYTEA_INT4:
+		case F_OVERLAY_BYTEA_BYTEA_INT4_INT4:
+		case F_OCTET_LENGTH_TEXT:
+		case F_OCTET_LENGTH_BYTEA:
+		case F_LENGTH_BYTEA:
+			return true;
+		default:
+			return false;
+	}
+}
+
+static Var *
+strip_relabel_var(Node *arg, Index varno)
+{
+	while (IsA(arg, RelabelType))
+		arg = (Node *) ((RelabelType *) arg)->arg;
+	if (IsA(arg, Var) && ((Var *) arg)->varattno > 0 &&
+		(varno == 0 || ((Var *) arg)->varno == varno))
+		return (Var *) arg;
+	return NULL;
+}
+
+static void
+pull_multi_detoast_count(Node *arg, pull_multi_detoast_context *context)
+{
+	Var		   *var = strip_relabel_var(arg, context->varno);
+
+	if (var == NULL)
+	{
+		pull_multi_detoast_walker(arg, context);
+		return;
+	}
+	if (bms_is_member(var->varattno, context->seen_once))
+	{
+		ListCell   *lc;
+
+		foreach(lc, context->multi_vars)
+		{
+			if (((Var *) lfirst(lc))->varattno == var->varattno)
+				return;
+		}
+		context->multi_vars = lappend(context->multi_vars, var);
+	}
+	else
+		context->seen_once = bms_add_member(context->seen_once, var->varattno);
+}
+
+/*
+ * Treat each argument of a function-like node as a detoasting reference when
+ * it is a plain Var (possibly relabeled); recurse into anything else.
+ */
+static void
+pull_multi_detoast_args(List *args, bool detoasts,
+						pull_multi_detoast_context *context)
+{
+	ListCell   *lc;
+
+	foreach(lc, args)
+	{
+		Node	   *arg = (Node *) lfirst(lc);
+
+		if (detoasts)
+			pull_multi_detoast_count(arg, context);
+		else
+			pull_multi_detoast_walker(arg, context);
+	}
+}
+
+static bool
+pull_multi_detoast_walker(Node *node, pull_multi_detoast_context *context)
+{
+	if (node == NULL)
+		return false;
+
+	switch (nodeTag(node))
+	{
+		case T_Var:
+			/* a Var reached here is passed along whole, not detoasted */
+			return false;
+		case T_FuncExpr:
+			{
+				FuncExpr   *f = (FuncExpr *) node;
+
+				/*
+				 * Functions that inspect the stored form are compiled to
+				 * receive the stored datum (see ExecInitFunc), so like slice
+				 * readers they do not count as detoasting references.
+				 */
+				pull_multi_detoast_args(f->args,
+										!ExecFuncReadsStoredForm(f->funcid) &&
+										!func_reads_slice_or_size(f->funcid),
+										context);
+				return false;
+			}
+		case T_OpExpr:
+		case T_DistinctExpr:
+			pull_multi_detoast_args(((OpExpr *) node)->args, true, context);
+			return false;
+		case T_ScalarArrayOpExpr:
+			pull_multi_detoast_args(((ScalarArrayOpExpr *) node)->args, true,
+									context);
+			return false;
+		case T_CoerceViaIO:
+			pull_multi_detoast_count((Node *) ((CoerceViaIO *) node)->arg,
+									 context);
+			return false;
+		case T_ArrayCoerceExpr:
+			pull_multi_detoast_count((Node *) ((ArrayCoerceExpr *) node)->arg,
+									 context);
+			pull_multi_detoast_walker((Node *) ((ArrayCoerceExpr *) node)->elemexpr,
+									  context);
+			return false;
+		case T_FieldSelect:
+			pull_multi_detoast_count((Node *) ((FieldSelect *) node)->arg,
+									 context);
+			return false;
+		case T_SubscriptingRef:
+			{
+				SubscriptingRef *sbsref = (SubscriptingRef *) node;
+
+				pull_multi_detoast_count((Node *) sbsref->refexpr, context);
+				pull_multi_detoast_walker((Node *) sbsref->refupperindexpr,
+										  context);
+				pull_multi_detoast_walker((Node *) sbsref->reflowerindexpr,
+										  context);
+				pull_multi_detoast_walker((Node *) sbsref->refassgnexpr,
+										  context);
+				return false;
+			}
+		case T_ArrayExpr:
+			pull_multi_detoast_args(((ArrayExpr *) node)->elements, true,
+									context);
+			return false;
+		case T_RowCompareExpr:
+			pull_multi_detoast_args(((RowCompareExpr *) node)->largs, true,
+									context);
+			pull_multi_detoast_args(((RowCompareExpr *) node)->rargs, true,
+									context);
+			return false;
+		default:
+
+			/*
+			 * Everything else (CASE, COALESCE, GREATEST/LEAST, NULLIF, ROW(),
+			 * boolean operators, NullTest, TargetEntry, ...) hands the datum
+			 * on without looking inside it, or returns it unchanged; only
+			 * what it feeds into can detoast.  This list of positions must
+			 * match the ones ExecInitDetoastArg is used for in execExpr.c.
+			 */
+			return expression_tree_walker(node, pull_multi_detoast_walker,
+										  context);
+	}
+}
+
+/*
+ * pull_multi_detoast_vars
+ *		Find scan-slot Vars that at least two expressions in a plan node's
+ *		targetlist and qual would detoast.  Each element of args counts as
+ *		one more argument position (a hash key the node hashes, say).
+ *
+ * A reference counts when the Var is a direct argument of a function-like
+ * node that reads the whole value and does not return it: function and
+ * operator calls, casts through I/O functions, field and subscript access,
+ * array construction and row comparison.  Bare Vars, Vars under constructs
+ * that may return them unchanged (CASE, COALESCE, GREATEST/LEAST, NULLIF),
+ * and Vars passed to functions known to read only a slice or the size of
+ * their argument, or to a function that inspects the stored form, do not
+ * count either.  Only Vars with the given varno count (0 means any, for scan
+ * nodes; OUTER_VAR or INNER_VAR for joins and aggregates).  Returns one Var
+ * per attribute number; the caller checks toastability.
+ */
+List *
+pull_multi_detoast_vars(List *targetlist, List *qual, List *args, Index varno)
+{
+	pull_multi_detoast_context context;
+
+	context.varno = varno;
+	context.seen_once = NULL;
+	context.multi_vars = NIL;
+
+	pull_multi_detoast_walker((Node *) targetlist, &context);
+	pull_multi_detoast_walker((Node *) qual, &context);
+	pull_multi_detoast_args(args, true, &context);
+
+	bms_free(context.seen_once);
+	return context.multi_vars;
+}
