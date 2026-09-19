@@ -258,3 +258,21 @@ Verification of the sidecache tip: Mac pgindent, build (0 warnings), module (def
 and debug_parallel_query=regress), regression, postgres_fdw, guard 30/30 at the
 series' targets; VM cassert module, guard 30/30, check-world; fork CI run
 35458028894.
+
+### Toasted rows: per-row cost of the two mechanisms (2026-09-19)
+
+perftoast.sh: 1000 rows with a 15 KB EXTERNAL jsonb, one row per plan-cached
+statement, 20,000 iterations, 3 rounds (all rounds agree to a few instructions).
+
+| statement (references) | master | series | sidecache | sidecache off |
+|------------------------|-------:|-------:|----------:|--------------:|
+| one                    | 53,564 | 53,692 (+128) | 53,921 (+357) | 53,933 |
+| two                    | 82,956 | 59,520 (-28%) | 59,760 (+240 vs series) | 83,439 |
+| four                   | 139,855 | 66,756 (-52%) | 67,014 (+258 vs series) | 140,452 |
+
+The sidecache's extra over the series is 230-260 instructions per statement and does
+not grow with the number of references, so it is the compile-time argument check plus
+the one palloc0 of the side array for the detoasted row; against the ~29,000
+instructions one 15 KB detoast costs, the per-row part is below 0.3% and an epoch
+counter is not warranted.  With the feature off the sidecache equals master within
+600 instructions (the compile-time check).
