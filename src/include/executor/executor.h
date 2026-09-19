@@ -586,6 +586,7 @@ extern Datum ExecMakeFunctionResultSet(SetExprState *fcache,
  * prototypes from functions in execScan.c
  */
 extern PGDLLIMPORT bool shared_detoast;
+extern void ExecInitJoinPredetoast(JoinState *js);
 
 /* prototypes from functions in execExpr.c */
 extern bool ExecFuncReadsStoredForm(Oid funcid);

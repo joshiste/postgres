@@ -157,3 +157,20 @@ ExecScanReScan(ScanState *node)
 
 /* Detoast a toasted column once per row when several expressions reference it */
 bool		shared_detoast = true;
+
+/*
+ * ExecInitJoinPredetoast
+ *		Install the planner-recorded sets of input attributes whose values
+ *		the join's expressions may detoast once per row (see
+ *		set_join_predetoast_attrs); the copies are kept beside the child slots.
+ */
+void
+ExecInitJoinPredetoast(JoinState *js)
+{
+	Join	   *join = (Join *) js->ps.plan;
+
+	if (!shared_detoast)
+		return;
+	js->ps.ps_predetoast_outerattrs = join->predetoast_outer_attrs;
+	js->ps.ps_predetoast_innerattrs = join->predetoast_inner_attrs;
+}

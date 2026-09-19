@@ -1055,6 +1055,14 @@ typedef struct Join
 	/* JOIN quals (in addition to plan.qual) */
 	List	   *joinqual;
 	Bitmapset  *ojrelids;
+
+	/*
+	 * Per input side, the toastable attributes several of this node's
+	 * expressions pass whole to functions, as Scan.predetoast_attrs (see
+	 * set_join_predetoast_attrs).
+	 */
+	Bitmapset  *predetoast_outer_attrs;
+	Bitmapset  *predetoast_inner_attrs;
 } Join;
 
 /* ----------------
@@ -1309,6 +1317,13 @@ typedef struct Agg
 
 	/* chained Agg/Sort nodes */
 	List	   *chain;
+
+	/*
+	 * Input attributes several of the aggregate arguments or quals pass whole
+	 * to functions, as Scan.predetoast_attrs (see
+	 * set_upper_predetoast_attrs).
+	 */
+	Bitmapset  *predetoast_outer_attrs;
 } Agg;
 
 /* ----------------
@@ -1386,6 +1401,13 @@ typedef struct WindowAgg
 	 * the plan
 	 */
 	bool		topWindow;
+
+	/*
+	 * Input attributes several of the window function arguments, quals or
+	 * output expressions pass whole to functions, as Scan.predetoast_attrs
+	 * (see set_upper_predetoast_attrs).
+	 */
+	Bitmapset  *predetoast_outer_attrs;
 } WindowAgg;
 
 /* ----------------
