@@ -227,6 +227,17 @@ typedef struct Plan
 	bool		async_capable;
 
 	/*
+	 * Attributes of the scan tuple, the outer input and the inner input that
+	 * this node's expressions may detoast once per row, keeping the copy
+	 * beside the slot (see set_plan_predetoast_attrs in setrefs.c).  The
+	 * executor compiles argument positions reading them to EEOP_*_VAR_TOAST
+	 * steps.
+	 */
+	Bitmapset  *predetoast_scanattrs;
+	Bitmapset  *predetoast_outerattrs;
+	Bitmapset  *predetoast_innerattrs;
+
+	/*
 	 * Common structural data for all Plan types.
 	 */
 	/* unique across entire final plan tree */

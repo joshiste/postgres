@@ -47,6 +47,7 @@
 #include "utils/acl.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
+#include "utils/fmgroids.h"
 #include "utils/jsonfuncs.h"
 #include "utils/jsonpath.h"
 #include "utils/lsyscache.h"
@@ -71,8 +72,12 @@ typedef struct ExprSetupInfo
 static void ExecReadyExpr(ExprState *state);
 static void ExecInitExprRec(Expr *node, ExprState *state,
 							Datum *resv, bool *resnull);
+static ExprState *ExecInitExprInternal(Expr *node, PlanState *parent,
+									   bool detoast_arg);
+static bool ExecPushDetoastArgStep(Expr *expr, ExprState *state,
+								   Datum *resv, bool *resnull);
 static void ExecInitFunc(ExprEvalStep *scratch, Expr *node, List *args,
-						 Oid funcid, Oid inputcollid,
+						 Oid funcid, Oid inputcollid, bool detoast_args,
 						 ExprState *state);
 static void ExecInitSubPlanExpr(SubPlan *subplan,
 								ExprState *state,
@@ -103,6 +108,30 @@ static void ExecInitJsonCoercion(ExprState *state, JsonReturning *returning,
 								 ErrorSaveContext *escontext, bool omit_quotes,
 								 bool exists_coerce,
 								 Datum *resv, bool *resnull);
+
+/*
+ * Prepare evaluation of an argument whose whole value the consuming step
+ * reads.  Only a PARAM_EXEC parameter, or a Var on a node that detoasts
+ * something once per row, can have a copy to hand out; everything else, the
+ * common case, is ExecInitExprRec without further ado.
+ */
+static inline void
+ExecInitDetoastArg(Expr *arg, ExprState *state, Datum *resv, bool *resnull)
+{
+	Expr	   *expr = arg;
+	Plan	   *plan = state->parent ? state->parent->plan : NULL;
+
+	while (IsA(expr, RelabelType))
+		expr = ((RelabelType *) expr)->arg;
+	if (!((IsA(expr, Param) && ((Param *) expr)->paramkind == PARAM_EXEC) ||
+		  (IsA(expr, Var) && plan != NULL &&
+		   (plan->predetoast_scanattrs != NULL ||
+			plan->predetoast_outerattrs != NULL ||
+			plan->predetoast_innerattrs != NULL))) ||
+		!ExecPushDetoastArgStep(expr, state, resv, resnull))
+		ExecInitExprRec(arg, state, resv, resnull);
+}
+
 
 
 /*
@@ -142,6 +171,44 @@ static void ExecInitJsonCoercion(ExprState *state, JsonReturning *returning,
 ExprState *
 ExecInitExpr(Expr *node, PlanState *parent)
 {
+	return ExecInitExprInternal(node, parent, false);
+}
+
+/*
+ * ExecInitExprArgList: ExecInitExprList for expressions consumed as function
+ * arguments (the arguments of a set-returning function call).
+ */
+List *
+ExecInitExprArgList(List *nodes, PlanState *parent)
+{
+	List	   *result = NIL;
+	ListCell   *lc;
+
+	foreach(lc, nodes)
+	{
+		Expr	   *e = lfirst(lc);
+
+		result = lappend(result, ExecInitExprArg(e, parent));
+	}
+
+	return result;
+}
+
+/*
+ * ExecInitExprArg: as ExecInitExpr, for an expression whose result the
+ * caller consumes whole as a function argument (a merge clause side, which
+ * is only ever compared), so that a plain Var of an attribute the node
+ * detoasts once per row hands out the copy kept beside the slot.
+ */
+ExprState *
+ExecInitExprArg(Expr *node, PlanState *parent)
+{
+	return ExecInitExprInternal(node, parent, true);
+}
+
+static ExprState *
+ExecInitExprInternal(Expr *node, PlanState *parent, bool detoast_arg)
+{
 	ExprState  *state;
 	ExprEvalStep scratch = {0};
 
@@ -159,7 +226,10 @@ ExecInitExpr(Expr *node, PlanState *parent)
 	ExecCreateExprSetupSteps(state, (Node *) node);
 
 	/* Compile the expression proper */
-	ExecInitExprRec(node, state, &state->resvalue, &state->resnull);
+	if (detoast_arg)
+		ExecInitDetoastArg(node, state, &state->resvalue, &state->resnull);
+	else
+		ExecInitExprRec(node, state, &state->resvalue, &state->resnull);
 
 	/* Finally, append a DONE step */
 	scratch.opcode = EEOP_DONE_RETURN;
@@ -435,17 +505,30 @@ ExecBuildProjectionInfo(List *targetList,
 
 		if (isSafeVar)
 		{
-			/* Fast-path: just generate an EEOP_ASSIGN_*_VAR step */
+			/*
+			 * Fast-path: just generate an EEOP_ASSIGN_*_VAR step.  A column
+			 * the node detoasts once per row gets the variant that carries
+			 * the detoasted copy along, so that a parent reading the column
+			 * as a function argument finds it.
+			 */
 			switch (variable->varno)
 			{
 				case INNER_VAR:
 					/* get the tuple from the inner node */
-					scratch.opcode = EEOP_ASSIGN_INNER_VAR;
+					if (parent && bms_is_member(attnum,
+												parent->plan->predetoast_innerattrs))
+						scratch.opcode = EEOP_ASSIGN_INNER_VAR_TOAST;
+					else
+						scratch.opcode = EEOP_ASSIGN_INNER_VAR;
 					break;
 
 				case OUTER_VAR:
 					/* get the tuple from the outer node */
-					scratch.opcode = EEOP_ASSIGN_OUTER_VAR;
+					if (parent && bms_is_member(attnum,
+												parent->plan->predetoast_outerattrs))
+						scratch.opcode = EEOP_ASSIGN_OUTER_VAR_TOAST;
+					else
+						scratch.opcode = EEOP_ASSIGN_OUTER_VAR;
 					break;
 
 					/* INDEX_VAR is handled by default case */
@@ -459,7 +542,11 @@ ExecBuildProjectionInfo(List *targetList,
 					switch (variable->varreturningtype)
 					{
 						case VAR_RETURNING_DEFAULT:
-							scratch.opcode = EEOP_ASSIGN_SCAN_VAR;
+							if (parent && bms_is_member(attnum,
+														parent->plan->predetoast_scanattrs))
+								scratch.opcode = EEOP_ASSIGN_SCAN_VAR_TOAST;
+							else
+								scratch.opcode = EEOP_ASSIGN_SCAN_VAR;
 							break;
 						case VAR_RETURNING_OLD:
 							scratch.opcode = EEOP_ASSIGN_OLD_VAR;
@@ -1195,7 +1282,7 @@ ExecInitExprRec(Expr *node, ExprState *state,
 
 				ExecInitFunc(&scratch, node,
 							 func->args, func->funcid, func->inputcollid,
-							 state);
+							 !ExecFuncReadsStoredForm(func->funcid), state);
 				ExprEvalPushStep(state, &scratch);
 				break;
 			}
@@ -1206,7 +1293,7 @@ ExecInitExprRec(Expr *node, ExprState *state,
 
 				ExecInitFunc(&scratch, node,
 							 op->args, op->opfuncid, op->inputcollid,
-							 state);
+							 true, state);
 				ExprEvalPushStep(state, &scratch);
 				break;
 			}
@@ -1217,7 +1304,7 @@ ExecInitExprRec(Expr *node, ExprState *state,
 
 				ExecInitFunc(&scratch, node,
 							 op->args, op->opfuncid, op->inputcollid,
-							 state);
+							 true, state);
 
 				/*
 				 * Change opcode of call instruction to EEOP_DISTINCT.
@@ -1237,9 +1324,10 @@ ExecInitExprRec(Expr *node, ExprState *state,
 			{
 				NullIfExpr *op = (NullIfExpr *) node;
 
+				/* NULLIF returns its first argument, so no detoasted copies */
 				ExecInitFunc(&scratch, node,
 							 op->args, op->opfuncid, op->inputcollid,
-							 state);
+							 false, state);
 
 				/*
 				 * If first argument is of varlena type, we'll need to ensure
@@ -1329,8 +1417,8 @@ ExecInitExprRec(Expr *node, ExprState *state,
 				if (OidIsValid(opexpr->hashfuncid))
 				{
 					/* Evaluate scalar directly into left function argument */
-					ExecInitExprRec(scalararg, state,
-									&fcinfo->args[0].value, &fcinfo->args[0].isnull);
+					ExecInitDetoastArg(scalararg, state,
+									   &fcinfo->args[0].value, &fcinfo->args[0].isnull);
 
 					/*
 					 * Evaluate array argument into our return value.  There's
@@ -1339,7 +1427,7 @@ ExecInitExprRec(Expr *node, ExprState *state,
 					 * EEOP_HASHED_SCALARARRAYOP, and will not be passed to
 					 * any other expression.
 					 */
-					ExecInitExprRec(arrayarg, state, resv, resnull);
+					ExecInitDetoastArg(arrayarg, state, resv, resnull);
 
 					/* And perform the operation */
 					scratch.opcode = EEOP_HASHED_SCALARARRAYOP;
@@ -1354,9 +1442,9 @@ ExecInitExprRec(Expr *node, ExprState *state,
 				else
 				{
 					/* Evaluate scalar directly into left function argument */
-					ExecInitExprRec(scalararg, state,
-									&fcinfo->args[0].value,
-									&fcinfo->args[0].isnull);
+					ExecInitDetoastArg(scalararg, state,
+									   &fcinfo->args[0].value,
+									   &fcinfo->args[0].isnull);
 
 					/*
 					 * Evaluate array argument into our return value.  There's
@@ -1364,7 +1452,7 @@ ExecInitExprRec(Expr *node, ExprState *state,
 					 * guaranteed to be overwritten by EEOP_SCALARARRAYOP, and
 					 * will not be passed to any other expression.
 					 */
-					ExecInitExprRec(arrayarg, state, resv, resnull);
+					ExecInitDetoastArg(arrayarg, state, resv, resnull);
 
 					/* And perform the operation */
 					scratch.opcode = EEOP_SCALARARRAYOP;
@@ -1492,7 +1580,7 @@ ExecInitExprRec(Expr *node, ExprState *state,
 				FieldSelect *fselect = (FieldSelect *) node;
 
 				/* evaluate row/record argument into result area */
-				ExecInitExprRec(fselect->arg, state, resv, resnull);
+				ExecInitDetoastArg(fselect->arg, state, resv, resnull);
 
 				/* and extract field */
 				scratch.opcode = EEOP_FIELDSELECT;
@@ -1618,7 +1706,7 @@ ExecInitExprRec(Expr *node, ExprState *state,
 				FunctionCallInfo fcinfo_in;
 
 				/* evaluate argument into step's result area */
-				ExecInitExprRec(iocoerce->arg, state, resv, resnull);
+				ExecInitDetoastArg(iocoerce->arg, state, resv, resnull);
 
 				/*
 				 * Prepare both output and input function calls, to be
@@ -1680,7 +1768,7 @@ ExecInitExprRec(Expr *node, ExprState *state,
 				ExprState  *elemstate;
 
 				/* evaluate argument into step's result area */
-				ExecInitExprRec(acoerce->arg, state, resv, resnull);
+				ExecInitDetoastArg(acoerce->arg, state, resv, resnull);
 
 				resultelemtype = get_element_type(acoerce->resulttype);
 				if (!OidIsValid(resultelemtype))
@@ -1950,9 +2038,10 @@ ExecInitExprRec(Expr *node, ExprState *state,
 				{
 					Expr	   *e = (Expr *) lfirst(lc);
 
-					ExecInitExprRec(e, state,
-									&scratch.d.arrayexpr.elemvalues[elemoff],
-									&scratch.d.arrayexpr.elemnulls[elemoff]);
+					/* construct_md_array copies the (detoasted) elements */
+					ExecInitDetoastArg(e, state,
+									   &scratch.d.arrayexpr.elemvalues[elemoff],
+									   &scratch.d.arrayexpr.elemnulls[elemoff]);
 					elemoff++;
 				}
 
@@ -2123,10 +2212,10 @@ ExecInitExprRec(Expr *node, ExprState *state,
 					 */
 
 					/* evaluate left and right args directly into fcinfo */
-					ExecInitExprRec(left_expr, state,
-									&fcinfo->args[0].value, &fcinfo->args[0].isnull);
-					ExecInitExprRec(right_expr, state,
-									&fcinfo->args[1].value, &fcinfo->args[1].isnull);
+					ExecInitDetoastArg(left_expr, state,
+									   &fcinfo->args[0].value, &fcinfo->args[0].isnull);
+					ExecInitDetoastArg(right_expr, state,
+									   &fcinfo->args[1].value, &fcinfo->args[1].isnull);
 
 					scratch.opcode = EEOP_ROWCOMPARE_STEP;
 					scratch.d.rowcompare_step.finfo = finfo;
@@ -2692,9 +2781,91 @@ ExprEvalPushStep(ExprState *es, const ExprEvalStep *s)
  * *scratch is not pushed here, so that callers may override the opcode,
  * which is useful for function-like cases like DISTINCT.
  */
+/*
+ * Does this function's result depend on the stored representation of a
+ * varlena argument?  Such a function must see the toast pointer itself, not
+ * a detoasted copy of the value.
+ */
+bool
+ExecFuncReadsStoredForm(Oid funcid)
+{
+	switch (funcid)
+	{
+		case F_PG_COLUMN_SIZE:
+		case F_PG_COLUMN_COMPRESSION:
+		case F_PG_COLUMN_TOAST_CHUNK_ID:
+			return true;
+		default:
+			return false;
+	}
+}
+
+/*
+ * Out-of-line part of ExecInitDetoastArg: push the step that hands out the
+ * detoasted copy if the argument qualifies, and say whether it did.  A plain
+ * Var of an attribute the node detoasts once per row becomes the
+ * corresponding EEOP_*_VAR_TOAST step; a varlena PARAM_EXEC parameter becomes
+ * EEOP_PARAM_EXEC_TOAST, which does the same for a parameter set from a slot
+ * column.  Everything else, and every Var or Param in any other position,
+ * goes through ExecInitExprRec and sees the stored datum.  Restricting the
+ * steps to argument positions is what keeps a detoasted copy from ever
+ * becoming an expression result: the constructs that return an input
+ * unchanged (bare Vars, RelabelType, CASE, COALESCE, GREATEST/LEAST, NULLIF)
+ * never get one.
+ */
+static bool
+ExecPushDetoastArgStep(Expr *expr, ExprState *state, Datum *resv, bool *resnull)
+{
+	ExprEvalStep scratch = {0};
+
+	if (IsA(expr, Param))
+	{
+		Param	   *param = (Param *) expr;
+
+		if (param->paramkind != PARAM_EXEC ||
+			get_typlen(param->paramtype) != -1)
+			return false;
+		scratch.opcode = EEOP_PARAM_EXEC_TOAST;
+		scratch.d.param.paramid = param->paramid;
+		scratch.d.param.paramtype = param->paramtype;
+	}
+	else
+	{
+		Var		   *var = (Var *) expr;
+		Plan	   *plan = state->parent->plan;
+		Bitmapset  *attrs;
+
+		if (var->varattno <= 0 || var->varreturningtype != VAR_RETURNING_DEFAULT)
+			return false;
+		switch (var->varno)
+		{
+			case INNER_VAR:
+				attrs = plan->predetoast_innerattrs;
+				scratch.opcode = EEOP_INNER_VAR_TOAST;
+				break;
+			case OUTER_VAR:
+				attrs = plan->predetoast_outerattrs;
+				scratch.opcode = EEOP_OUTER_VAR_TOAST;
+				break;
+			default:
+				attrs = plan->predetoast_scanattrs;
+				scratch.opcode = EEOP_SCAN_VAR_TOAST;
+				break;
+		}
+		if (!bms_is_member(var->varattno, attrs))
+			return false;
+		scratch.d.var.attnum = var->varattno - 1;
+		scratch.d.var.vartype = var->vartype;
+	}
+	scratch.resvalue = resv;
+	scratch.resnull = resnull;
+	ExprEvalPushStep(state, &scratch);
+	return true;
+}
+
 static void
 ExecInitFunc(ExprEvalStep *scratch, Expr *node, List *args, Oid funcid,
-			 Oid inputcollid, ExprState *state)
+			 Oid inputcollid, bool detoast_args, ExprState *state)
 {
 	int			nargs = list_length(args);
 	AclResult	aclresult;
@@ -2766,6 +2937,12 @@ ExecInitFunc(ExprEvalStep *scratch, Expr *node, List *args, Oid funcid,
 
 			fcinfo->args[argno].value = con->constvalue;
 			fcinfo->args[argno].isnull = con->constisnull;
+		}
+		else if (detoast_args)
+		{
+			ExecInitDetoastArg(arg, state,
+							   &fcinfo->args[argno].value,
+							   &fcinfo->args[argno].isnull);
 		}
 		else
 		{
@@ -2841,6 +3018,7 @@ ExecInitSubPlanExpr(SubPlan *subplan,
 	{
 		int			paramid = lfirst_int(l);
 		Expr	   *arg = (Expr *) lfirst(pvar);
+		Expr	   *src = arg;
 
 		ExecInitExprRec(arg, state, resv, resnull);
 
@@ -2850,6 +3028,22 @@ ExecInitSubPlanExpr(SubPlan *subplan,
 		scratch.d.param.paramid = paramid;
 		/* paramtype's not actually used, but we might as well fill it */
 		scratch.d.param.paramtype = exprType((Node *) arg);
+
+		/*
+		 * A plain column value may have a detoasted copy beside its slot;
+		 * tell the step where, so that argument positions in the subplan can
+		 * use it (see ExecEvalParamExecToast).
+		 */
+		scratch.d.param.srcattnum = 0;
+		scratch.d.param.srcvarno = 0;
+		while (IsA(src, RelabelType))
+			src = ((RelabelType *) src)->arg;
+		if (IsA(src, Var) && ((Var *) src)->varattno > 0 &&
+			((Var *) src)->varreturningtype == VAR_RETURNING_DEFAULT)
+		{
+			scratch.d.param.srcattnum = ((Var *) src)->varattno;
+			scratch.d.param.srcvarno = ((Var *) src)->varno;
+		}
 		ExprEvalPushStep(state, &scratch);
 	}
 
@@ -3298,7 +3492,7 @@ ExecInitSubscriptingRef(ExprEvalStep *scratch, SubscriptingRef *sbsref,
 	 * be overwritten by the final EEOP_SBSREF_FETCH/ASSIGN step, which is
 	 * pushed last.
 	 */
-	ExecInitExprRec(sbsref->refexpr, state, resv, resnull);
+	ExecInitDetoastArg(sbsref->refexpr, state, resv, resnull);
 
 	/*
 	 * If refexpr yields NULL, and the operation should be strict, then result
@@ -4375,10 +4569,10 @@ ExecBuildHash32Expr(TupleDesc desc, const TupleTableSlotOps *ops,
 		 * Build the steps to evaluate the hash function's argument, placing
 		 * the value in the 0th argument of the hash func.
 		 */
-		ExecInitExprRec(expr,
-						state,
-						&fcinfo->args[0].value,
-						&fcinfo->args[0].isnull);
+		ExecInitDetoastArg(expr,
+						   state,
+						   &fcinfo->args[0].value,
+						   &fcinfo->args[0].isnull);
 
 		if (i == num_exprs - 1)
 		{
