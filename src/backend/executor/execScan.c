@@ -157,6 +157,8 @@ ExecScanReScan(ScanState *node)
 
 /* Detoast a toasted column once per row when several expressions reference it */
 bool		shared_detoast = true;
+bool		shared_detoast_all_refs = false;
+bool		shared_detoast_refined_check = false;
 
 /*
  * ExecInitJoinPredetoast

@@ -588,6 +588,8 @@ extern Datum ExecMakeFunctionResultSet(SetExprState *fcache,
  * prototypes from functions in execScan.c
  */
 extern PGDLLIMPORT bool shared_detoast;
+extern PGDLLIMPORT bool shared_detoast_all_refs;
+extern PGDLLIMPORT bool shared_detoast_refined_check;
 extern void ExecInitJoinPredetoast(JoinState *js);
 
 typedef TupleTableSlot *(*ExecScanAccessMtd) (ScanState *node);

@@ -57,6 +57,11 @@
 #include "postgres.h"
 
 #include "access/detoast.h"
+
+/* shootout: the interpreter's fast-path test before calling ExecEvalVarToast */
+#define DETOAST_WORTH(ptr) \
+	(shared_detoast_refined_check ? \
+	 (VARATT_IS_4B_C(ptr) || VARATT_IS_1B_E(ptr)) : VARATT_IS_EXTENDED(ptr))
 #include "access/heaptoast.h"
 #include "access/tupconvert.h"
 #include "catalog/pg_type.h"
@@ -744,7 +749,7 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			/* only out-of-line or compressed values are worth the call */
 			Assert(attnum >= 0 && attnum < innerslot->tts_nvalid);
 			if (!innerslot->tts_isnull[attnum] &&
-				VARATT_IS_EXTENDED(DatumGetPointer(innerslot->tts_values[attnum])))
+				DETOAST_WORTH(DatumGetPointer(innerslot->tts_values[attnum])))
 				ExecEvalVarToast(state, op, econtext, innerslot);
 			else
 			{
@@ -762,7 +767,7 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			/* only out-of-line or compressed values are worth the call */
 			Assert(attnum >= 0 && attnum < outerslot->tts_nvalid);
 			if (!outerslot->tts_isnull[attnum] &&
-				VARATT_IS_EXTENDED(DatumGetPointer(outerslot->tts_values[attnum])))
+				DETOAST_WORTH(DatumGetPointer(outerslot->tts_values[attnum])))
 				ExecEvalVarToast(state, op, econtext, outerslot);
 			else
 			{
@@ -780,7 +785,7 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			/* only out-of-line or compressed values are worth the call */
 			Assert(attnum >= 0 && attnum < scanslot->tts_nvalid);
 			if (!scanslot->tts_isnull[attnum] &&
-				VARATT_IS_EXTENDED(DatumGetPointer(scanslot->tts_values[attnum])))
+				DETOAST_WORTH(DatumGetPointer(scanslot->tts_values[attnum])))
 				ExecEvalVarToast(state, op, econtext, scanslot);
 			else
 			{

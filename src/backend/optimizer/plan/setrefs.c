@@ -675,7 +675,8 @@ set_scan_predetoast_attrs(PlannerInfo *root, Scan *scan)
 	if (!shared_detoast)
 		return;
 
-	vars = pull_multi_detoast_vars(plan->targetlist, plan->qual, false, 0);
+	vars = pull_multi_detoast_vars(plan->targetlist, plan->qual,
+								   shared_detoast_all_refs, 0);
 	if (vars == NIL)
 		return;
 
@@ -742,6 +743,7 @@ set_join_predetoast_attrs(Join *join)
 	for (int side = 0; side < 2; side++)
 	{
 		List	   *vars = pull_multi_detoast_vars(plan->targetlist, quals,
+												   shared_detoast_all_refs ||
 												   sides[side] == OUTER_VAR,
 												   sides[side]);
 		Plan	   *child = sides[side] == OUTER_VAR ?
@@ -796,8 +798,8 @@ set_upper_predetoast_attrs(Plan *plan, Bitmapset **attrs)
 	if (!shared_detoast)
 		return;
 
-	vars = pull_multi_detoast_vars(plan->targetlist, plan->qual, false,
-								   OUTER_VAR);
+	vars = pull_multi_detoast_vars(plan->targetlist, plan->qual,
+								   shared_detoast_all_refs, OUTER_VAR);
 	foreach(lc, vars)
 	{
 		Var		   *var = (Var *) lfirst(lc);
