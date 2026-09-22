@@ -2649,10 +2649,6 @@ ExecInitWindowAgg(WindowAgg *node, EState *estate, int eflags)
 	outerPlan = outerPlan(node);
 	outerPlanState(winstate) = ExecInitNode(outerPlan, estate, eflags);
 
-	/* input attributes the node's expressions may detoast once per row */
-	if (shared_detoast)
-		winstate->ss.ps.ps_predetoast_outerattrs = node->predetoast_outer_attrs;
-
 	/*
 	 * initialize source tuple type (which is also the tuple type that we'll
 	 * store in the tuplestore and use in all our working slots).

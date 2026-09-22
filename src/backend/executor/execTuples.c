@@ -2142,10 +2142,6 @@ ExecInitScanTupleSlot(EState *estate, ScanState *scanstate,
 	scanstate->ps.scanopsfixed = tupledesc != NULL;
 	scanstate->ps.scanops = tts_ops;
 	scanstate->ps.scanopsset = true;
-	/* Agg, Sort and others embed a ScanState too; only real scans qualify */
-	if (shared_detoast && IsScanPlan(scanstate->ps.plan))
-		scanstate->ps.ps_predetoast_scanattrs =
-			((Scan *) scanstate->ps.plan)->predetoast_attrs;
 }
 
 /* ----------------

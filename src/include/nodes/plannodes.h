@@ -227,6 +227,17 @@ typedef struct Plan
 	bool		async_capable;
 
 	/*
+	 * Attributes of the scan tuple, the outer input and the inner input that
+	 * this node's expressions may detoast once per row, keeping the copy
+	 * beside the slot (see set_plan_predetoast_attrs in setrefs.c).  The
+	 * executor compiles argument positions reading them to EEOP_*_VAR_TOAST
+	 * steps.
+	 */
+	Bitmapset  *predetoast_scanattrs;
+	Bitmapset  *predetoast_outerattrs;
+	Bitmapset  *predetoast_innerattrs;
+
+	/*
 	 * Common structural data for all Plan types.
 	 */
 	/* unique across entire final plan tree */
@@ -540,14 +551,6 @@ typedef struct Scan
 	Plan		plan;
 	/* relid is index into the range table */
 	Index		scanrelid;
-
-	/*
-	 * Toastable scan-slot attributes that several of this node's expressions
-	 * pass whole to functions, which the executor therefore detoasts once per
-	 * row, keeping the copy beside the scan slot (see
-	 * set_scan_predetoast_attrs and ExecInitDetoastArg).
-	 */
-	Bitmapset  *predetoast_attrs;
 } Scan;
 
 /*
@@ -1055,14 +1058,6 @@ typedef struct Join
 	/* JOIN quals (in addition to plan.qual) */
 	List	   *joinqual;
 	Bitmapset  *ojrelids;
-
-	/*
-	 * Per input side, the toastable attributes several of this node's
-	 * expressions pass whole to functions, as Scan.predetoast_attrs (see
-	 * set_join_predetoast_attrs).
-	 */
-	Bitmapset  *predetoast_outer_attrs;
-	Bitmapset  *predetoast_inner_attrs;
 } Join;
 
 /* ----------------
@@ -1317,13 +1312,6 @@ typedef struct Agg
 
 	/* chained Agg/Sort nodes */
 	List	   *chain;
-
-	/*
-	 * Input attributes several of the aggregate arguments or quals pass whole
-	 * to functions, as Scan.predetoast_attrs (see
-	 * set_upper_predetoast_attrs).
-	 */
-	Bitmapset  *predetoast_outer_attrs;
 } Agg;
 
 /* ----------------
@@ -1401,13 +1389,6 @@ typedef struct WindowAgg
 	 * the plan
 	 */
 	bool		topWindow;
-
-	/*
-	 * Input attributes several of the window function arguments, quals or
-	 * output expressions pass whole to functions, as Scan.predetoast_attrs
-	 * (see set_upper_predetoast_attrs).
-	 */
-	Bitmapset  *predetoast_outer_attrs;
 } WindowAgg;
 
 /* ----------------

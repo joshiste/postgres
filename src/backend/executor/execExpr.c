@@ -74,8 +74,8 @@ static void ExecInitExprRec(Expr *node, ExprState *state,
 							Datum *resv, bool *resnull);
 static ExprState *ExecInitExprInternal(Expr *node, PlanState *parent,
 									   bool detoast_arg);
-static void ExecInitDetoastedVar(Expr *arg, ExprState *state,
-								 Datum *resv, bool *resnull);
+static bool ExecPushDetoastArgStep(Expr *expr, ExprState *state,
+								   Datum *resv, bool *resnull);
 static void ExecInitFunc(ExprEvalStep *scratch, Expr *node, List *args,
 						 Oid funcid, Oid inputcollid, bool detoast_args,
 						 ExprState *state);
@@ -118,18 +118,17 @@ static void ExecInitJsonCoercion(ExprState *state, JsonReturning *returning,
 static inline void
 ExecInitDetoastArg(Expr *arg, ExprState *state, Datum *resv, bool *resnull)
 {
-	PlanState  *parent = state->parent;
 	Expr	   *expr = arg;
+	Plan	   *plan = state->parent ? state->parent->plan : NULL;
 
 	while (IsA(expr, RelabelType))
 		expr = ((RelabelType *) expr)->arg;
-	if ((IsA(expr, Param) && ((Param *) expr)->paramkind == PARAM_EXEC) ||
-		(IsA(expr, Var) && parent != NULL &&
-		 (parent->ps_predetoast_scanattrs != NULL ||
-		  parent->ps_predetoast_outerattrs != NULL ||
-		  parent->ps_predetoast_innerattrs != NULL)))
-		ExecInitDetoastedVar(arg, state, resv, resnull);
-	else
+	if (!((IsA(expr, Param) && ((Param *) expr)->paramkind == PARAM_EXEC) ||
+		  (IsA(expr, Var) && plan != NULL &&
+		   (plan->predetoast_scanattrs != NULL ||
+			plan->predetoast_outerattrs != NULL ||
+			plan->predetoast_innerattrs != NULL))) ||
+		!ExecPushDetoastArgStep(expr, state, resv, resnull))
 		ExecInitExprRec(arg, state, resv, resnull);
 }
 
@@ -506,18 +505,18 @@ ExecBuildProjectionInfo(List *targetList,
 
 		if (isSafeVar)
 		{
-			/* Fast-path: just generate an EEOP_ASSIGN_*_VAR step */
 			/*
-			 * A column the node detoasts once per row is assigned by a step
-			 * that also carries the detoasted copy along, so that a parent
-			 * reading the column as a function argument finds it.
+			 * Fast-path: just generate an EEOP_ASSIGN_*_VAR step.  A column
+			 * the node detoasts once per row gets the variant that carries
+			 * the detoasted copy along, so that a parent reading the column
+			 * as a function argument finds it.
 			 */
 			switch (variable->varno)
 			{
 				case INNER_VAR:
 					/* get the tuple from the inner node */
 					if (parent && bms_is_member(attnum,
-												parent->ps_predetoast_innerattrs))
+												parent->plan->predetoast_innerattrs))
 						scratch.opcode = EEOP_ASSIGN_INNER_VAR_TOAST;
 					else
 						scratch.opcode = EEOP_ASSIGN_INNER_VAR;
@@ -526,7 +525,7 @@ ExecBuildProjectionInfo(List *targetList,
 				case OUTER_VAR:
 					/* get the tuple from the outer node */
 					if (parent && bms_is_member(attnum,
-												parent->ps_predetoast_outerattrs))
+												parent->plan->predetoast_outerattrs))
 						scratch.opcode = EEOP_ASSIGN_OUTER_VAR_TOAST;
 					else
 						scratch.opcode = EEOP_ASSIGN_OUTER_VAR;
@@ -544,7 +543,7 @@ ExecBuildProjectionInfo(List *targetList,
 					{
 						case VAR_RETURNING_DEFAULT:
 							if (parent && bms_is_member(attnum,
-														parent->ps_predetoast_scanattrs))
+														parent->plan->predetoast_scanattrs))
 								scratch.opcode = EEOP_ASSIGN_SCAN_VAR_TOAST;
 							else
 								scratch.opcode = EEOP_ASSIGN_SCAN_VAR;
@@ -2802,85 +2801,66 @@ ExecFuncReadsStoredForm(Oid funcid)
 }
 
 /*
- * Out-of-line part of ExecInitDetoastArg.  A plain Var (possibly relabeled)
- * of an attribute the node detoasts once per row is compiled to the
- * corresponding EEOP_*_VAR_TOAST step, which hands out the copy kept beside
- * the slot, and a varlena PARAM_EXEC parameter to EEOP_PARAM_EXEC_TOAST,
- * which does the same for a parameter set from a slot column; everything
- * else, and every Var or Param in any other position, goes through
- * ExecInitExprRec and sees the stored datum.  Restricting the steps to
- * argument positions is what keeps a detoasted copy from ever becoming an
- * expression result: the constructs that return an input unchanged (bare
- * Vars, RelabelType, CASE, COALESCE, GREATEST/LEAST, NULLIF) never get one.
+ * Out-of-line part of ExecInitDetoastArg: push the step that hands out the
+ * detoasted copy if the argument qualifies, and say whether it did.  A plain
+ * Var of an attribute the node detoasts once per row becomes the
+ * corresponding EEOP_*_VAR_TOAST step; a varlena PARAM_EXEC parameter becomes
+ * EEOP_PARAM_EXEC_TOAST, which does the same for a parameter set from a slot
+ * column.  Everything else, and every Var or Param in any other position,
+ * goes through ExecInitExprRec and sees the stored datum.  Restricting the
+ * steps to argument positions is what keeps a detoasted copy from ever
+ * becoming an expression result: the constructs that return an input
+ * unchanged (bare Vars, RelabelType, CASE, COALESCE, GREATEST/LEAST, NULLIF)
+ * never get one.
  */
-static void
-ExecInitDetoastedVar(Expr *arg, ExprState *state, Datum *resv, bool *resnull)
+static bool
+ExecPushDetoastArgStep(Expr *expr, ExprState *state, Datum *resv, bool *resnull)
 {
-	PlanState  *parent = state->parent;
-	Expr	   *expr = arg;
-	Var		   *var;
-	Bitmapset  *attrs;
 	ExprEvalStep scratch = {0};
 
-	while (IsA(expr, RelabelType))
-		expr = ((RelabelType *) expr)->arg;
 	if (IsA(expr, Param))
 	{
 		Param	   *param = (Param *) expr;
 
 		if (param->paramkind != PARAM_EXEC ||
 			get_typlen(param->paramtype) != -1)
-		{
-			ExecInitExprRec(arg, state, resv, resnull);
-			return;
-		}
+			return false;
 		scratch.opcode = EEOP_PARAM_EXEC_TOAST;
-		scratch.resvalue = resv;
-		scratch.resnull = resnull;
 		scratch.d.param.paramid = param->paramid;
 		scratch.d.param.paramtype = param->paramtype;
-		ExprEvalPushStep(state, &scratch);
-		return;
 	}
-	if (!IsA(expr, Var) || parent == NULL)
+	else
 	{
-		ExecInitExprRec(arg, state, resv, resnull);
-		return;
-	}
-	var = (Var *) expr;
-	if (var->varattno <= 0 || var->varreturningtype != VAR_RETURNING_DEFAULT)
-	{
-		ExecInitExprRec(arg, state, resv, resnull);
-		return;
-	}
+		Var		   *var = (Var *) expr;
+		Plan	   *plan = state->parent->plan;
+		Bitmapset  *attrs;
 
-	switch (var->varno)
-	{
-		case INNER_VAR:
-			attrs = parent->ps_predetoast_innerattrs;
-			scratch.opcode = EEOP_INNER_VAR_TOAST;
-			break;
-		case OUTER_VAR:
-			attrs = parent->ps_predetoast_outerattrs;
-			scratch.opcode = EEOP_OUTER_VAR_TOAST;
-			break;
-		default:
-			attrs = parent->ps_predetoast_scanattrs;
-			scratch.opcode = EEOP_SCAN_VAR_TOAST;
-			break;
+		if (var->varattno <= 0 || var->varreturningtype != VAR_RETURNING_DEFAULT)
+			return false;
+		switch (var->varno)
+		{
+			case INNER_VAR:
+				attrs = plan->predetoast_innerattrs;
+				scratch.opcode = EEOP_INNER_VAR_TOAST;
+				break;
+			case OUTER_VAR:
+				attrs = plan->predetoast_outerattrs;
+				scratch.opcode = EEOP_OUTER_VAR_TOAST;
+				break;
+			default:
+				attrs = plan->predetoast_scanattrs;
+				scratch.opcode = EEOP_SCAN_VAR_TOAST;
+				break;
+		}
+		if (!bms_is_member(var->varattno, attrs))
+			return false;
+		scratch.d.var.attnum = var->varattno - 1;
+		scratch.d.var.vartype = var->vartype;
 	}
-	if (!bms_is_member(var->varattno, attrs))
-	{
-		ExecInitExprRec(arg, state, resv, resnull);
-		return;
-	}
-
 	scratch.resvalue = resv;
 	scratch.resnull = resnull;
-	scratch.d.var.attnum = var->varattno - 1;
-	scratch.d.var.vartype = var->vartype;
-	scratch.d.var.varreturningtype = var->varreturningtype;
 	ExprEvalPushStep(state, &scratch);
+	return true;
 }
 
 static void

@@ -7023,9 +7023,9 @@ SELECT * FROM parent WHERE key = 2400;
         <function>pg_column_toast_chunk_id</function>, keep seeing it when
         applied to the column directly; a function that receives the column
         as an argument and calls them internally sees the fetched value, as
-        it would for any other argument.  Setting this parameter off restores
-        the per-reference behavior and skips the planning work.  The default
-        is <literal>on</literal>.
+        it would for any other argument.  The parameter is consulted when a
+        query is planned; setting it off restores the per-reference behavior
+        for plans made afterwards.  The default is <literal>on</literal>.
        </para>
       </listitem>
      </varlistentry>

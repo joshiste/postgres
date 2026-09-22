@@ -17,7 +17,6 @@
 
 #include "access/transam.h"
 #include "catalog/pg_type.h"
-#include "executor/executor.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/optimizer.h"
@@ -30,7 +29,6 @@
 #include "parser/parsetree.h"
 #include "rewrite/rewriteManip.h"
 #include "tcop/utility.h"
-#include "utils/lsyscache.h"
 #include "utils/syscache.h"
 #include "utils/typcache.h"
 
@@ -138,13 +136,7 @@ static bool flatten_rtes_walker(Node *node, flatten_rtes_walker_context *cxt);
 static void add_rte_to_flat_rtable(PlannerGlobal *glob, List *rteperminfos,
 								   RangeTblEntry *rte);
 static Plan *set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset);
-static void set_scan_predetoast_attrs(PlannerInfo *root, Scan *scan);
-static void set_join_predetoast_attrs(Join *join);
-static void set_upper_predetoast_attrs(Plan *plan, Bitmapset **attrs);
-static List *join_side_quals(Join *join);
-static void add_cross_node_predetoast_attrs(Plan *child, List *ptlist,
-											List *pquals, Index varno,
-											Bitmapset **parent_attrs);
+static void set_plan_predetoast_attrs(Plan *plan);
 static Plan *set_indexonlyscan_references(PlannerInfo *root,
 										  IndexOnlyScan *plan,
 										  int rtoffset);
@@ -641,175 +633,19 @@ add_rte_to_flat_rtable(PlannerGlobal *glob, List *rteperminfos,
 	}
 }
 
+/* Detoast a toasted column once per row when several expressions reference it */
+bool		shared_detoast = true;
+
 /*
  * toastable_type
- *		Is this a varlena type whose values may be stored out of line or
- *		compressed?  The type cache has both facts without a catalog fetch.
+ *		Can values of this type be stored out of line or compressed?  The
+ *		type cache answers without a catalog fetch, unlike TypeIsToastable();
+ *		only varlena types have anything but PLAIN storage.
  */
 static bool
 toastable_type(Oid typid)
 {
-	TypeCacheEntry *typentry = lookup_type_cache(typid, 0);
-
-	return typentry->typlen == -1 && typentry->typstorage != TYPSTORAGE_PLAIN;
-}
-
-/*
- * set_scan_predetoast_attrs
- *		Record which scan-slot attributes the executor may detoast once per
- *		row, now that the node's expressions are final.
- *
- * Candidates are toastable attributes that two or more expressions of the
- * node pass whole to a function.  Nothing else needs deciding here: the copy
- * lives beside the slot and only argument positions read it (see
- * ExecInitDetoastArg), so it can neither end up in a stored tuple nor reach
- * a function that inspects the stored form.
- */
-static void
-set_scan_predetoast_attrs(PlannerInfo *root, Scan *scan)
-{
-	Plan	   *plan = &scan->plan;
-	List	   *vars;
-	Oid			relid = InvalidOid;
-	Bitmapset  *attrs = NULL;
-	ListCell   *lc;
-
-	scan->predetoast_attrs = NULL;
-
-	if (!shared_detoast)
-		return;
-
-	vars = pull_detoast_vars(plan->targetlist, plan->qual, 0, NULL);
-	if (vars == NIL)
-		return;
-
-	/*
-	 * Column-level storage settings override the type's default, so consult
-	 * pg_attribute when the scan tuple is a table row.  Scans whose tuple has
-	 * a shape of their own (see ScanUsesIndexVar) fall back to the type.
-	 */
-	if (!ScanUsesIndexVar(plan))
-	{
-		/* scanrelid was already offset into the flattened range table */
-		RangeTblEntry *rte = rt_fetch(scan->scanrelid, root->glob->finalrtable);
-
-		if (rte->rtekind == RTE_RELATION)
-			relid = rte->relid;
-	}
-
-	foreach(lc, vars)
-	{
-		Var		   *var = (Var *) lfirst(lc);
-
-		if (!toastable_type(var->vartype))
-			continue;
-		/* a column may have been set to PLAIN storage explicitly */
-		if (OidIsValid(relid) &&
-			get_attstorage(relid, var->varattno) == TYPSTORAGE_PLAIN)
-			continue;
-		attrs = bms_add_member(attrs, var->varattno);
-	}
-	list_free(vars);
-
-	scan->predetoast_attrs = attrs;
-}
-
-/*
- * set_join_predetoast_attrs
- *		Same as set_scan_predetoast_attrs, per input side of a join.
- *
- * The join's expressions see its inputs through OUTER_VAR and INNER_VAR, and
- * the copies are kept beside the child slots.  Merge and hash clauses count
- * like other quals.  On the outer side a single reference is enough: the
- * outer tuple stays put while the join runs its quals and projection once
- * per inner row (and a hash join hashes the key and then compares it), so
- * the first evaluation's copy serves all of them.  A child output column
- * that is a constant or a row built in memory is skipped, since it can
- * never be toasted.
- */
-static void
-set_join_predetoast_attrs(Join *join)
-{
-	Plan	   *plan = &join->plan;
-	List	   *quals;
-	Index		sides[2] = {OUTER_VAR, INNER_VAR};
-	ListCell   *lc;
-
-	if (!shared_detoast)
-		return;
-
-	quals = join_side_quals(join);
-	for (int side = 0; side < 2; side++)
-	{
-		List	   *once = NIL;
-		List	   *vars = pull_detoast_vars(plan->targetlist, quals,
-											 sides[side], &once);
-		Plan	   *child = sides[side] == OUTER_VAR ?
-			plan->lefttree : plan->righttree;
-		Bitmapset  *attrs = NULL;
-
-		if (sides[side] == OUTER_VAR)
-			vars = list_concat(vars, once);
-		else
-			list_free(once);
-
-		foreach(lc, vars)
-		{
-			Var		   *var = (Var *) lfirst(lc);
-			Node	   *cexpr;
-
-			if (!toastable_type(var->vartype))
-				continue;
-
-			/*
-			 * A constant, or a row the child builds in memory, is never
-			 * toasted.  The child's targetlist is not fixed yet, so either
-			 * may still be wrapped in a PlaceHolderVar.
-			 */
-			cexpr = (Node *) list_nth_node(TargetEntry, child->targetlist,
-										   var->varattno - 1)->expr;
-			while (IsA(cexpr, PlaceHolderVar))
-				cexpr = (Node *) ((PlaceHolderVar *) cexpr)->phexpr;
-			if (IsA(cexpr, Const) || IsA(cexpr, RowExpr))
-				continue;
-			attrs = bms_add_member(attrs, var->varattno);
-		}
-		list_free(vars);
-
-		if (sides[side] == OUTER_VAR)
-			join->predetoast_outer_attrs = attrs;
-		else
-			join->predetoast_inner_attrs = attrs;
-	}
-	list_free(quals);
-}
-
-/*
- * set_upper_predetoast_attrs
- *		Same as set_join_predetoast_attrs, for the single input of an Agg or
- *		WindowAgg node: aggregate or window function arguments, quals and
- *		output expressions that pass the same input column whole to
- *		functions more than once.
- */
-static void
-set_upper_predetoast_attrs(Plan *plan, Bitmapset **attrs)
-{
-	List	   *vars;
-	ListCell   *lc;
-
-	*attrs = NULL;
-	if (!shared_detoast)
-		return;
-
-	vars = pull_detoast_vars(plan->targetlist, plan->qual, OUTER_VAR, NULL);
-	foreach(lc, vars)
-	{
-		Var		   *var = (Var *) lfirst(lc);
-
-		if (toastable_type(var->vartype))
-			*attrs = bms_add_member(*attrs, var->varattno);
-	}
-	list_free(vars);
+	return lookup_type_cache(typid, 0)->typstorage != TYPSTORAGE_PLAIN;
 }
 
 /*
@@ -857,92 +693,134 @@ expand_append_members(Plan *child, List *result)
 }
 
 /*
- * add_cross_node_predetoast_attrs
- *		Count references across a bare projection.
+ * input_predetoast_attrs
+ *		The attributes of one input of a node that its expressions may detoast
+ *		once per row: toastable attributes that two or more argument positions
+ *		of the targetlist and quals read, or one when single_ref_ok (the outer
+ *		side of a join, whose tuple stays put while the join runs its
+ *		expressions once per inner row, so the copy serves all of them).
  *
- * A column a scan reads once and its parent reads once, through a plain Var
- * of the scan in the child's targetlist, is detoasted in both nodes.  Marked
- * in both, the scan makes the copy on its reference and the parent finds it,
- * in the scan slot it reads directly or carried up by the scan's projection.
- * The same goes for one side reading it twice and the other once.  This is
- * only worth doing for parents that read the child's slot as the child
- * returns it: joins on either side and Agg.  A Hash node and a WindowAgg's
- * tuplestore store the tuple, where the copy does not reach them; a plain or
- * sorted Agg reads the first row of each group from a copied tuple as well
- * and shares from the second row on.  Append and MergeAppend members count
- * as children of the node above them.
+ * References split between this node and a scan it reads directly add up as
+ * well: a column the scan reads and this node reads through a plain Var of
+ * the scan in the child's targetlist is marked in both, so that the scan
+ * makes the copy on its reference and this node finds it, in the scan slot it
+ * reads directly or carried up by the scan's projection.  child is that
+ * input plan; an Append or MergeAppend of scans counts as its members.
+ * Parents that store the tuple first (a Hash node, a WindowAgg's tuplestore)
+ * pass NULL, since the copy does not reach them; a plain or sorted Agg reads
+ * the first row of each group from a copied tuple and shares from the second
+ * row on.  A child output column that is a constant or a row built in memory
+ * is never toasted and is skipped.
  */
-static void
-add_cross_node_predetoast_attrs(Plan *child, List *ptlist, List *pquals,
-								Index varno, Bitmapset **parent_attrs)
+static Bitmapset *
+input_predetoast_attrs(List *tlist, List *quals, Index varno,
+					   bool single_ref_ok, Plan *child)
 {
-	List	   *members = expand_append_members(child, NIL);
-	List	   *ponce = NIL;
-	List	   *pmulti;
-	Bitmapset  *pmulti_attrs = NULL;
-	List	   *pvars;
+	Bitmapset  *multi;
+	List	   *vars = pull_detoast_vars(tlist, quals, varno, &multi);
+	List	   *cands = NIL;
+	Bitmapset  *attrs = NULL;
+	List	   *members;
 	ListCell   *lc;
 
-	pmulti = pull_detoast_vars(ptlist, pquals, varno, &ponce);
-	foreach(lc, pmulti)
-		pmulti_attrs = bms_add_member(pmulti_attrs, ((Var *) lfirst(lc))->varattno);
-	pvars = list_concat(pmulti, ponce);
+	foreach(lc, vars)
+	{
+		Var		   *var = (Var *) lfirst(lc);
+		TargetEntry *tle;
 
+		if (!toastable_type(var->vartype))
+			continue;
+		if (child != NULL &&
+			(tle = get_tle_by_resno(child->targetlist, var->varattno)) != NULL &&
+			(IsA(tle->expr, Const) || IsA(tle->expr, RowExpr)))
+			continue;
+		cands = lappend(cands, var);
+		if (single_ref_ok || bms_is_member(var->varattno, multi))
+			attrs = bms_add_member(attrs, var->varattno);
+	}
+
+	members = expand_append_members(child, NIL);
 	foreach_ptr(Plan, member, members)
 	{
-		Scan	   *scan = (Scan *) member;
-		List	   *conce = NIL;
-		List	   *cmulti;
-		Bitmapset  *conce_attrs = NULL;
-		Bitmapset  *cmulti_attrs = NULL;
-		ListCell   *plc;
+		Bitmapset  *cmulti;
+		List	   *cvars;
+		Bitmapset  *cseen = NULL;
+		ListCell   *clc;
 
-		if (!IsScanPlan(member) || pvars == NIL)
+		if (!IsScanPlan(member) || cands == NIL)
 			continue;
+		cvars = pull_detoast_vars(member->targetlist, member->qual, 0, &cmulti);
+		foreach(clc, cvars)
+			cseen = bms_add_member(cseen, ((Var *) lfirst(clc))->varattno);
 
-		cmulti = pull_detoast_vars(member->targetlist, member->qual, 0, &conce);
-		foreach(plc, cmulti)
-			cmulti_attrs = bms_add_member(cmulti_attrs, ((Var *) lfirst(plc))->varattno);
-		foreach(plc, conce)
-			conce_attrs = bms_add_member(conce_attrs, ((Var *) lfirst(plc))->varattno);
-
-		foreach(plc, pvars)
+		foreach(clc, cands)
 		{
-			Var		   *pvar = (Var *) lfirst(plc);
-			TargetEntry *tle;
+			Var		   *var = (Var *) lfirst(clc);
+			TargetEntry *tle = get_tle_by_resno(member->targetlist,
+												var->varattno);
 			Node	   *expr;
-			AttrNumber	cattno;
 
-			if (!toastable_type(pvar->vartype) ||
-				pvar->varattno > list_length(member->targetlist))
+			if (tle == NULL)
 				continue;
-			tle = list_nth_node(TargetEntry, member->targetlist,
-								pvar->varattno - 1);
 			expr = (Node *) tle->expr;
 			while (IsA(expr, RelabelType))
 				expr = (Node *) ((RelabelType *) expr)->arg;
-			if (!IsA(expr, Var) || ((Var *) expr)->varattno <= 0)
+			if (!IsA(expr, Var) ||
+				!bms_is_member(((Var *) expr)->varattno, cseen))
 				continue;
-			cattno = ((Var *) expr)->varattno;
-
-			/* the scan must read the column itself for there to be a copy */
-			if (!bms_is_member(cattno, cmulti_attrs) &&
-				!bms_is_member(cattno, conce_attrs))
-				continue;
-
-			/* both sides read it, so the counts add up to two or more */
-			scan->predetoast_attrs = bms_add_member(scan->predetoast_attrs,
-													cattno);
-			*parent_attrs = bms_add_member(*parent_attrs, pvar->varattno);
+			member->predetoast_scanattrs =
+				bms_add_member(member->predetoast_scanattrs,
+							   ((Var *) expr)->varattno);
+			attrs = bms_add_member(attrs, var->varattno);
 		}
-		list_free(cmulti);
-		list_free(conce);
-		bms_free(cmulti_attrs);
-		bms_free(conce_attrs);
+		list_free(cvars);
+		bms_free(cmulti);
+		bms_free(cseen);
 	}
-	list_free(pvars);
-	bms_free(pmulti_attrs);
 	list_free(members);
+	list_free(cands);
+	list_free(vars);
+	bms_free(multi);
+	return attrs;
+}
+
+/*
+ * set_plan_predetoast_attrs
+ *		Record, once a node and its children have their references fixed,
+ *		which input attributes the executor may detoast once per row (see
+ *		input_predetoast_attrs).  Nothing about the sets affects results:
+ *		they only decide where the copy is worth making.
+ */
+static void
+set_plan_predetoast_attrs(Plan *plan)
+{
+	if (!shared_detoast)
+		return;
+
+	if (IsScanPlan(plan))
+		plan->predetoast_scanattrs =
+			input_predetoast_attrs(plan->targetlist, plan->qual, 0, false,
+								   NULL);
+	else if (IsA(plan, NestLoop) || IsA(plan, MergeJoin) || IsA(plan, HashJoin))
+	{
+		List	   *quals = join_side_quals((Join *) plan);
+
+		plan->predetoast_outerattrs =
+			input_predetoast_attrs(plan->targetlist, quals, OUTER_VAR, true,
+								   plan->lefttree);
+		plan->predetoast_innerattrs =
+			input_predetoast_attrs(plan->targetlist, quals, INNER_VAR, false,
+								   plan->righttree);
+		list_free(quals);
+	}
+	else if (IsA(plan, Agg))
+		plan->predetoast_outerattrs =
+			input_predetoast_attrs(plan->targetlist, plan->qual, OUTER_VAR,
+								   false, plan->lefttree);
+	else if (IsA(plan, WindowAgg))
+		plan->predetoast_outerattrs =
+			input_predetoast_attrs(plan->targetlist, plan->qual, OUTER_VAR,
+								   false, NULL);
 }
 
 /*
@@ -1302,7 +1180,6 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 				}
 
 				set_upper_references(root, plan, rtoffset);
-				set_upper_predetoast_attrs(plan, &agg->predetoast_outer_attrs);
 			}
 			break;
 		case T_Group:
@@ -1325,7 +1202,6 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 																			(Plan *) wplan);
 
 				set_upper_references(root, plan, rtoffset);
-				set_upper_predetoast_attrs(plan, &wplan->predetoast_outer_attrs);
 
 				/*
 				 * Like Limit node limit/offset expressions, WindowAgg has
@@ -1664,14 +1540,6 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 	}
 
 	/*
-	 * For scan nodes, record which scan-slot attributes more than one of the
-	 * (now final) expressions would detoast, so the executor can detoast them
-	 * once per row without walking the expressions again at every start.
-	 */
-	if (IsScanPlan(plan))
-		set_scan_predetoast_attrs(root, (Scan *) plan);
-
-	/*
 	 * Now recurse into child plans, if any
 	 *
 	 * NOTE: it is essential that we recurse into child plans AFTER we set
@@ -1683,32 +1551,10 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 	plan->righttree = set_plan_refs(root, plan->righttree, rtoffset);
 
 	/*
-	 * With the children's sets known, references a scan and this node split
-	 * between them can be counted together (see
-	 * add_cross_node_predetoast_attrs).
+	 * With the node's and its children's expressions final, record what the
+	 * executor may detoast once per row.
 	 */
-	if (shared_detoast)
-	{
-		if (IsA(plan, NestLoop) || IsA(plan, MergeJoin) || IsA(plan, HashJoin))
-		{
-			Join	   *join = (Join *) plan;
-			List	   *quals = join_side_quals(join);
-
-			add_cross_node_predetoast_attrs(plan->lefttree, plan->targetlist,
-											quals, OUTER_VAR,
-											&join->predetoast_outer_attrs);
-			if (!IsA(plan, HashJoin))
-				add_cross_node_predetoast_attrs(plan->righttree,
-												plan->targetlist, quals,
-												INNER_VAR,
-												&join->predetoast_inner_attrs);
-			list_free(quals);
-		}
-		else if (IsA(plan, Agg))
-			add_cross_node_predetoast_attrs(plan->lefttree, plan->targetlist,
-											plan->qual, OUTER_VAR,
-											&((Agg *) plan)->predetoast_outer_attrs);
-	}
+	set_plan_predetoast_attrs(plan);
 
 	return plan;
 }
@@ -1783,7 +1629,7 @@ set_indexonlyscan_references(PlannerInfo *root,
 
 	pfree(index_itlist);
 
-	set_scan_predetoast_attrs(root, &plan->scan);
+	set_plan_predetoast_attrs((Plan *) plan);
 
 	return (Plan *) plan;
 }
@@ -1839,7 +1685,7 @@ set_subqueryscan_references(PlannerInfo *root,
 		plan->scan.plan.qual =
 			fix_scan_list(root, plan->scan.plan.qual,
 						  rtoffset, NUM_EXEC_QUAL((Plan *) plan));
-		set_scan_predetoast_attrs(root, &plan->scan);
+		set_plan_predetoast_attrs((Plan *) plan);
 
 		result = (Plan *) plan;
 	}
@@ -2861,8 +2707,6 @@ set_join_references(PlannerInfo *root, Join *join, int rtoffset)
 									rtoffset,
 									(bms_is_empty(join->ojrelids) ? NRM_EQUAL : NRM_SUPERSET),
 									NUM_EXEC_QUAL((Plan *) join));
-
-	set_join_predetoast_attrs(join);
 
 	pfree(outer_itlist);
 	pfree(inner_itlist);

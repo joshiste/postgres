@@ -1220,16 +1220,6 @@ typedef struct PlanState
 	ExprContext *ps_ExprContext;	/* node's expression-evaluation context */
 	ProjectionInfo *ps_ProjInfo;	/* info for doing tuple projection */
 
-	/*
-	 * Scan-slot attribute numbers whose Var references in argument positions
-	 * of this node's expressions compile to EEOP_SCAN_VAR_TOAST, which
-	 * detoasts the value once per row and keeps the copy beside the slot (see
-	 * ExecInitDetoastArg).  NULL for nodes without a scan slot.
-	 */
-	Bitmapset  *ps_predetoast_scanattrs;
-	Bitmapset  *ps_predetoast_outerattrs;	/* same, for a node's inputs */
-	Bitmapset  *ps_predetoast_innerattrs;
-
 	bool		async_capable;	/* true if node is async-capable */
 
 	/*

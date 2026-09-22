@@ -1285,7 +1285,7 @@ WHERE c1 = 642 AND length(to_tsvector('custom_search'::regconfig, c3)) > 0;
    Output: c1, to_tsvector('custom_search'::regconfig, c3)
    Filter: (length(to_tsvector('custom_search'::regconfig, ft1.c3)) > 0)
    Remote SQL: SELECT "C 1", c3 FROM "S 1"."T 1" WHERE (("C 1" = 642))
-   Pre-detoast: c3
+   Pre-detoast: ft1.c3
 (5 rows)
 
 SELECT c1, to_tsvector('custom_search'::regconfig, c3) FROM ft1

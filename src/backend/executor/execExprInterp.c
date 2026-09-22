@@ -459,6 +459,31 @@ ExecReadyInterpretedExpr(ExprState *state)
 
 
 /*
+ * Inline part of the EEOP_*_VAR_TOAST steps.  Values that are neither
+ * compressed nor stored out of line, the common case for short strings, are
+ * handed out as they are without leaving the interpreter loop; the others go
+ * to ExecEvalVarToast for the copy.
+ */
+static inline void
+ExecEvalVarToastInline(ExprState *state, ExprEvalStep *op,
+					   ExprContext *econtext, TupleTableSlot *slot)
+{
+	int			attnum = op->d.var.attnum;
+	Datum		value = slot->tts_values[attnum];
+
+	Assert(attnum >= 0 && attnum < slot->tts_nvalid);
+	if (!slot->tts_isnull[attnum] &&
+		(VARATT_IS_COMPRESSED(DatumGetPointer(value)) ||
+		 VARATT_IS_EXTERNAL(DatumGetPointer(value))))
+		ExecEvalVarToast(state, op, econtext, slot);
+	else
+	{
+		*op->resvalue = value;
+		*op->resnull = slot->tts_isnull[attnum];
+	}
+}
+
+/*
  * Evaluate expression identified by "state" in the execution context
  * given by "econtext".  *isnull is set to the is-null flag for the result,
  * and the Datum value is the function result.
@@ -739,69 +764,21 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 
 		EEO_CASE(EEOP_INNER_VAR_TOAST)
 		{
-			int			attnum = op->d.var.attnum;
-
-			/*
-			 * Only out-of-line or compressed values are worth the call; short
-			 * values with a one-byte header are not, and testing for them
-			 * here keeps a column of short strings on the inline path.
-			 */
-			Assert(attnum >= 0 && attnum < innerslot->tts_nvalid);
-			if (!innerslot->tts_isnull[attnum] &&
-				(VARATT_IS_COMPRESSED(DatumGetPointer(innerslot->tts_values[attnum])) ||
-				 VARATT_IS_EXTERNAL(DatumGetPointer(innerslot->tts_values[attnum]))))
-				ExecEvalVarToast(state, op, econtext, innerslot);
-			else
-			{
-				*op->resvalue = innerslot->tts_values[attnum];
-				*op->resnull = innerslot->tts_isnull[attnum];
-			}
+			ExecEvalVarToastInline(state, op, econtext, innerslot);
 
 			EEO_NEXT();
 		}
 
 		EEO_CASE(EEOP_OUTER_VAR_TOAST)
 		{
-			int			attnum = op->d.var.attnum;
-
-			/*
-			 * Only out-of-line or compressed values are worth the call; short
-			 * values with a one-byte header are not, and testing for them
-			 * here keeps a column of short strings on the inline path.
-			 */
-			Assert(attnum >= 0 && attnum < outerslot->tts_nvalid);
-			if (!outerslot->tts_isnull[attnum] &&
-				(VARATT_IS_COMPRESSED(DatumGetPointer(outerslot->tts_values[attnum])) ||
-				 VARATT_IS_EXTERNAL(DatumGetPointer(outerslot->tts_values[attnum]))))
-				ExecEvalVarToast(state, op, econtext, outerslot);
-			else
-			{
-				*op->resvalue = outerslot->tts_values[attnum];
-				*op->resnull = outerslot->tts_isnull[attnum];
-			}
+			ExecEvalVarToastInline(state, op, econtext, outerslot);
 
 			EEO_NEXT();
 		}
 
 		EEO_CASE(EEOP_SCAN_VAR_TOAST)
 		{
-			int			attnum = op->d.var.attnum;
-
-			/*
-			 * Only out-of-line or compressed values are worth the call; short
-			 * values with a one-byte header are not, and testing for them
-			 * here keeps a column of short strings on the inline path.
-			 */
-			Assert(attnum >= 0 && attnum < scanslot->tts_nvalid);
-			if (!scanslot->tts_isnull[attnum] &&
-				(VARATT_IS_COMPRESSED(DatumGetPointer(scanslot->tts_values[attnum])) ||
-				 VARATT_IS_EXTERNAL(DatumGetPointer(scanslot->tts_values[attnum]))))
-				ExecEvalVarToast(state, op, econtext, scanslot);
-			else
-			{
-				*op->resvalue = scanslot->tts_values[attnum];
-				*op->resnull = scanslot->tts_isnull[attnum];
-			}
+			ExecEvalVarToastInline(state, op, econtext, scanslot);
 
 			EEO_NEXT();
 		}
@@ -5777,21 +5754,13 @@ ExecEvalWholeRowVar(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
 }
 
 /*
- * Evaluate a Var whose value is detoasted once per tuple, with the copy kept
- * beside the slot.
- *
- * Only out-of-line and compressed values are worth the trouble; short-header
- * values are returned as they are.  The copy goes into tts_detoasted, never
- * into tts_values, so every other reader of the slot (a projection of the
- * bare column, a slot copy or spill, a function inspecting the stored form)
- * keeps seeing the stored datum; only the argument positions compiled by
- * ExecInitDetoastArg see the copy.  The memory lives in the slot's detoast
- * context, which ExecClearTuple and the ExecStore* functions reset when the
- * slot moves on to another tuple.
+ * The detoasted copy of the slot's attnum'th value, made on first use.  The
+ * caller has checked that attr is out of line or compressed.  Copies live in
+ * the slot's detoast context, which the slot implementations reset whenever
+ * tts_values is invalidated; tts_values itself is never modified.
  */
-/* Make sure the slot has its detoast context and side array for this tuple */
-static inline Datum *
-slot_detoasted_array(TupleTableSlot *slot)
+static Datum
+slot_detoast_attr(TupleTableSlot *slot, int attnum, varlena *attr)
 {
 	if (unlikely(slot->tts_detoast_cxt == NULL))
 		slot->tts_detoast_cxt =
@@ -5803,38 +5772,38 @@ slot_detoasted_array(TupleTableSlot *slot)
 			MemoryContextAllocZero(slot->tts_detoast_cxt,
 								   slot->tts_tupleDescriptor->natts *
 								   sizeof(Datum));
-	return slot->tts_detoasted;
+	if (slot->tts_detoasted[attnum] == (Datum) 0)
+	{
+		MemoryContext oldcxt = MemoryContextSwitchTo(slot->tts_detoast_cxt);
+
+		slot->tts_detoasted[attnum] = PointerGetDatum(detoast_attr(attr));
+		MemoryContextSwitchTo(oldcxt);
+	}
+	return slot->tts_detoasted[attnum];
 }
 
+/*
+ * Evaluate a Var whose value is detoasted once per tuple, with the copy kept
+ * beside the slot.  Only out-of-line and compressed values are copied;
+ * anything else, including expanded and indirect datums, is returned as it
+ * is.  Only the argument positions compiled by ExecInitDetoastArg use this
+ * step, so every other reader of the slot keeps seeing the stored datum.
+ */
 void
 ExecEvalVarToast(ExprState *state, ExprEvalStep *op, ExprContext *econtext,
 				 TupleTableSlot *slot)
 {
 	int			attnum = op->d.var.attnum;
-	Datum		value;
+	Datum		value = slot->tts_values[attnum];
 
 	Assert(attnum >= 0 && attnum < slot->tts_nvalid);
-
 	*op->resnull = slot->tts_isnull[attnum];
-	value = slot->tts_values[attnum];
 	if (!*op->resnull)
 	{
 		varlena    *attr = (varlena *) DatumGetPointer(value);
 
 		if (VARATT_IS_EXTERNAL_ONDISK(attr) || VARATT_IS_COMPRESSED(attr))
-		{
-			Datum	   *detoasted = slot_detoasted_array(slot);
-
-			if (detoasted[attnum] == (Datum) 0)
-			{
-				MemoryContext oldcxt;
-
-				oldcxt = MemoryContextSwitchTo(slot->tts_detoast_cxt);
-				detoasted[attnum] = PointerGetDatum(detoast_attr(attr));
-				MemoryContextSwitchTo(oldcxt);
-			}
-			value = detoasted[attnum];
-		}
+			value = slot_detoast_attr(slot, attnum, attr);
 	}
 	*op->resvalue = value;
 }
@@ -5854,21 +5823,12 @@ void
 ExecEvalParamExecToast(ExprState *state, ExprEvalStep *op,
 					   ExprContext *econtext)
 {
-	ParamExecData *prm;
+	ParamExecData *prm = &(econtext->ecxt_param_exec_vals[op->d.param.paramid]);
 	TupleTableSlot *slot;
 	int			attnum;
 	varlena    *attr;
 
-	prm = &(econtext->ecxt_param_exec_vals[op->d.param.paramid]);
-	if (unlikely(prm->execPlan != NULL))
-	{
-		/* Parameter not evaluated yet, so go do it */
-		ExecSetParamPlan(prm->execPlan, econtext);
-		/* ExecSetParamPlan should have processed this param... */
-		Assert(prm->execPlan == NULL);
-	}
-	*op->resvalue = prm->value;
-	*op->resnull = prm->isnull;
+	ExecEvalParamExec(state, op, econtext);
 
 	slot = prm->detoast_slot;
 	if (prm->isnull || slot == NULL)
@@ -5879,19 +5839,7 @@ ExecEvalParamExecToast(ExprState *state, ExprEvalStep *op,
 		return;
 	attr = (varlena *) DatumGetPointer(prm->value);
 	if (VARATT_IS_EXTERNAL_ONDISK(attr) || VARATT_IS_COMPRESSED(attr))
-	{
-		Datum	   *detoasted = slot_detoasted_array(slot);
-
-		if (detoasted[attnum] == (Datum) 0)
-		{
-			MemoryContext oldcxt;
-
-			oldcxt = MemoryContextSwitchTo(slot->tts_detoast_cxt);
-			detoasted[attnum] = PointerGetDatum(detoast_attr(attr));
-			MemoryContextSwitchTo(oldcxt);
-		}
-		*op->resvalue = detoasted[attnum];
-	}
+		*op->resvalue = slot_detoast_attr(slot, attnum, attr);
 }
 
 /*
@@ -5918,7 +5866,19 @@ ExecEvalAssignVarToast(ExprState *state, ExprEvalStep *op,
 	resultslot->tts_isnull[resultnum] = slot->tts_isnull[attnum];
 
 	if (slot->tts_detoasted != NULL && slot->tts_detoasted[attnum] != (Datum) 0)
-		slot_detoasted_array(resultslot)[resultnum] = slot->tts_detoasted[attnum];
+	{
+		if (unlikely(resultslot->tts_detoast_cxt == NULL))
+			resultslot->tts_detoast_cxt =
+				GenerationContextCreate(resultslot->tts_mcxt,
+										"detoasted slot values",
+										ALLOCSET_DEFAULT_SIZES);
+		if (resultslot->tts_detoasted == NULL)
+			resultslot->tts_detoasted =
+				MemoryContextAllocZero(resultslot->tts_detoast_cxt,
+									   resultslot->tts_tupleDescriptor->natts *
+									   sizeof(Datum));
+		resultslot->tts_detoasted[resultnum] = slot->tts_detoasted[attnum];
+	}
 }
 
 void

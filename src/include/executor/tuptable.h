@@ -526,7 +526,6 @@ ExecClearTuple(TupleTableSlot *slot)
 static inline void
 ExecMaterializeSlot(TupleTableSlot *slot)
 {
-	ExecSlotResetDetoast(slot);
 	slot->tts_ops->materialize(slot);
 }
 
@@ -581,7 +580,6 @@ ExecCopySlot(TupleTableSlot *dstslot, TupleTableSlot *srcslot)
 	Assert(dstslot->tts_tupleDescriptor->natts ==
 		   srcslot->tts_tupleDescriptor->natts);
 
-	ExecSlotResetDetoast(dstslot);
 	dstslot->tts_ops->copyslot(dstslot, srcslot);
 
 	return dstslot;

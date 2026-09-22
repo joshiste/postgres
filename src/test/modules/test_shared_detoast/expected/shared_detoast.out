@@ -116,7 +116,7 @@ EXPLAIN (VERBOSE, COSTS OFF) SELECT doc->'a', doc->'b' FROM sd WHERE doc ? 'c';
  Seq Scan on public.sd
    Output: (doc -> 'a'::text), (doc -> 'b'::text)
    Filter: (sd.doc ? 'c'::text)
-   Pre-detoast: doc
+   Pre-detoast: sd.doc
 (4 rows)
 
 -- functions that inspect the stored form get the stored datum while the
@@ -483,7 +483,7 @@ EXPLAIN (VERBOSE, COSTS OFF) SELECT count(*) FROM sd WHERE doc ? 'a' AND doc @> 
    ->  Seq Scan on public.sd
          Output: id, doc, small, txt, ctxt
          Filter: ((sd.doc ? 'a'::text) AND (sd.doc @> '{"b": 2}'::jsonb))
-         Pre-detoast: doc
+         Pre-detoast: sd.doc
 (7 rows)
 
 SELECT count(*) FROM sd WHERE doc ? 'a' AND doc @> '{"b": 2}' GROUP BY id;
@@ -512,11 +512,11 @@ EXPLAIN (VERBOSE, COSTS OFF) SELECT id, sum((doc->>'a')::int) FROM sd WHERE doc 
  HashAggregate
    Output: id, sum(((doc ->> 'a'::text))::integer)
    Group Key: sd.id
-   Pre-detoast Outer: doc
+   Pre-detoast Outer: sd.doc
    ->  Seq Scan on public.sd
          Output: id, doc, small, txt, ctxt
          Filter: ((sd.doc ? 'a'::text) AND (sd.doc @> '{"b": 2}'::jsonb))
-         Pre-detoast: doc
+         Pre-detoast: sd.doc
 (8 rows)
 
 SELECT id, sum((doc->>'a')::int) FROM sd WHERE doc ? 'a' AND doc @> '{"b": 2}' GROUP BY id;
@@ -533,7 +533,7 @@ EXPLAIN (VERBOSE, COSTS OFF) SELECT sum((doc->>'a')::int), sum((doc->>'b')::int)
 ------------------------------------------------------------------------------------
  Aggregate
    Output: sum(((doc ->> 'a'::text))::integer), sum(((doc ->> 'b'::text))::integer)
-   Pre-detoast Outer: doc
+   Pre-detoast Outer: sd.doc
    ->  Seq Scan on public.sd
          Output: id, doc, small, txt, ctxt
 (5 rows)
@@ -554,11 +554,11 @@ EXPLAIN (VERBOSE, COSTS OFF) SELECT sum((doc->>'a')::int) FROM sd WHERE doc ? 'a
 -----------------------------------------------
  Aggregate
    Output: sum(((doc ->> 'a'::text))::integer)
-   Pre-detoast Outer: doc
+   Pre-detoast Outer: sd.doc
    ->  Seq Scan on public.sd
          Output: id, doc, small, txt, ctxt
          Filter: (sd.doc ? 'a'::text)
-         Pre-detoast: doc
+         Pre-detoast: sd.doc
 (7 rows)
 
 SELECT sum((doc->>'a')::int) FROM sd WHERE doc ? 'a';
@@ -966,7 +966,7 @@ EXPLAIN (VERBOSE, COSTS OFF) SELECT doc->'a', doc->'b', count(*) OVER () FROM sd
  WindowAgg
    Output: (doc -> 'a'::text), (doc -> 'b'::text), count(*) OVER w1
    Window: w1 AS ()
-   Pre-detoast Outer: doc
+   Pre-detoast Outer: sd3.doc
    ->  Seq Scan on public.sd3
          Output: doc
          Filter: (sd3.doc ? 'k1'::text)
@@ -1037,7 +1037,7 @@ EXPLAIN (VERBOSE, COSTS OFF) SELECT doc->'a', doc->'b' FROM sd3 WHERE id = 1;
  Bitmap Heap Scan on public.sd3
    Output: (doc -> 'a'::text), (doc -> 'b'::text)
    Recheck Cond: (sd3.id = 1)
-   Pre-detoast: doc
+   Pre-detoast: sd3.doc
    ->  Bitmap Index Scan on sd3_docidx
          Index Cond: (sd3.id = 1)
 (6 rows)
@@ -1062,7 +1062,7 @@ EXPLAIN (VERBOSE, COSTS OFF) SELECT length(md5(ctxt)), ctxt = ctxt FROM sd WHERE
  Index Only Scan using sd_ctxt_idx on public.sd
    Output: length(md5(ctxt)), (ctxt = ctxt)
    Index Cond: (sd.id = 1)
-   Pre-detoast: ctxt
+   Pre-detoast: sd.ctxt
 (4 rows)
 
 SELECT length(md5(ctxt)), ctxt = ctxt FROM sd WHERE id = 1;

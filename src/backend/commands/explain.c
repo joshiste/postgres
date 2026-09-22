@@ -2297,10 +2297,10 @@ ExplainNode(PlanState *planstate, List *ancestors,
 		}
 	}
 
-	/* Show attributes detoasted in place */
-	if (es->verbose && (planstate->ps_predetoast_scanattrs ||
-						planstate->ps_predetoast_outerattrs ||
-						planstate->ps_predetoast_innerattrs))
+	/* Show attributes detoasted once per row */
+	if (es->verbose && (planstate->plan->predetoast_scanattrs ||
+						planstate->plan->predetoast_outerattrs ||
+						planstate->plan->predetoast_innerattrs))
 		show_predetoast_attrs(planstate, ancestors, es);
 
 	/* Show buffer/WAL usage */
@@ -2587,16 +2587,16 @@ show_predetoast_attrs(PlanState *planstate, List *ancestors, ExplainState *es)
 {
 	List	   *context = set_deparse_context_plan(es->deparse_cxt,
 												   planstate->plan, ancestors);
-	bool		useprefix = es->rtable_size > 1;
+	bool		useprefix = true;	/* shown under VERBOSE only */
 
-	if (planstate->ps_predetoast_scanattrs && planstate->scandesc != NULL)
+	if (planstate->plan->predetoast_scanattrs && planstate->scandesc != NULL)
 	{
 		Scan	   *scan = (Scan *) planstate->plan;
 		Index		varno = ScanUsesIndexVar(planstate->plan) ?
 			INDEX_VAR : scan->scanrelid;
 
 		ExplainPropertyList("Pre-detoast",
-							predetoast_attr_names(planstate->ps_predetoast_scanattrs,
+							predetoast_attr_names(planstate->plan->predetoast_scanattrs,
 												  varno, planstate->scandesc,
 												  context, useprefix),
 							es);
@@ -2604,8 +2604,8 @@ show_predetoast_attrs(PlanState *planstate, List *ancestors, ExplainState *es)
 
 	for (int side = 0; side < 2; side++)
 	{
-		Bitmapset  *attrs = side == 0 ? planstate->ps_predetoast_outerattrs :
-			planstate->ps_predetoast_innerattrs;
+		Bitmapset  *attrs = side == 0 ? planstate->plan->predetoast_outerattrs :
+			planstate->plan->predetoast_innerattrs;
 		PlanState  *child = side == 0 ? outerPlanState(planstate) :
 			innerPlanState(planstate);
 

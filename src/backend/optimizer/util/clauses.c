@@ -6838,9 +6838,9 @@ make_SAOP_expr(Oid oper, Node *leftexpr, Oid coltype, Oid arraycollid,
 typedef struct
 {
 	Index		varno;			/* only Vars of this varno count; 0 = any */
-	Bitmapset  *seen_once;		/* attnos seen in one detoasting position */
-	List	   *once_vars;		/* one Var per attno seen at least once */
-	List	   *multi_vars;		/* one Var per attno seen two or more times */
+	Bitmapset  *seen;			/* attnos seen in a detoasting position */
+	Bitmapset  *multi;			/* attnos seen in two or more */
+	List	   *vars;			/* one Var per attno in seen */
 } pull_multi_detoast_context;
 
 static bool pull_multi_detoast_walker(Node *node,
@@ -6903,21 +6903,12 @@ pull_multi_detoast_count(Node *arg, pull_multi_detoast_context *context)
 		pull_multi_detoast_walker(arg, context);
 		return;
 	}
-	if (bms_is_member(var->varattno, context->seen_once))
-	{
-		ListCell   *lc;
-
-		foreach(lc, context->multi_vars)
-		{
-			if (((Var *) lfirst(lc))->varattno == var->varattno)
-				return;
-		}
-		context->multi_vars = lappend(context->multi_vars, var);
-	}
+	if (bms_is_member(var->varattno, context->seen))
+		context->multi = bms_add_member(context->multi, var->varattno);
 	else
 	{
-		context->seen_once = bms_add_member(context->seen_once, var->varattno);
-		context->once_vars = lappend(context->once_vars, var);
+		context->seen = bms_add_member(context->seen, var->varattno);
+		context->vars = lappend(context->vars, var);
 	}
 }
 
@@ -7029,10 +7020,9 @@ pull_multi_detoast_walker(Node *node, pull_multi_detoast_context *context)
 
 /*
  * pull_detoast_vars
- *		Find scan-slot Vars that a plan node's targetlist and qual would
- *		detoast: the result holds one Var per attribute referenced two or more
- *		times, *once_vars (if wanted) one Var per attribute referenced exactly
- *		once.
+ *		Find the scan-slot Vars that a plan node's targetlist and qual would
+ *		detoast: one Var per attribute read in an argument position, with
+ *		*multi holding the attributes read in two or more.
  *
  * A reference counts when the Var is a direct argument of a function-like
  * node that reads the whole value and does not return it: function and
@@ -7046,34 +7036,19 @@ pull_multi_detoast_walker(Node *node, pull_multi_detoast_context *context)
  * toastability.
  */
 List *
-pull_detoast_vars(List *targetlist, List *qual, Index varno, List **once_vars)
+pull_detoast_vars(List *targetlist, List *qual, Index varno, Bitmapset **multi)
 {
 	pull_multi_detoast_context context;
-	Bitmapset  *multi = NULL;
-	List	   *once = NIL;
-	ListCell   *lc;
 
 	context.varno = varno;
-	context.seen_once = NULL;
-	context.once_vars = NIL;
-	context.multi_vars = NIL;
+	context.seen = NULL;
+	context.multi = NULL;
+	context.vars = NIL;
 
 	pull_multi_detoast_walker((Node *) targetlist, &context);
 	pull_multi_detoast_walker((Node *) qual, &context);
-	bms_free(context.seen_once);
 
-	if (once_vars)
-	{
-		foreach(lc, context.multi_vars)
-			multi = bms_add_member(multi, ((Var *) lfirst(lc))->varattno);
-		foreach(lc, context.once_vars)
-		{
-			if (!bms_is_member(((Var *) lfirst(lc))->varattno, multi))
-				once = lappend(once, lfirst(lc));
-		}
-		bms_free(multi);
-		*once_vars = once;
-	}
-	list_free(context.once_vars);
-	return context.multi_vars;
+	bms_free(context.seen);
+	*multi = context.multi;
+	return context.vars;
 }
