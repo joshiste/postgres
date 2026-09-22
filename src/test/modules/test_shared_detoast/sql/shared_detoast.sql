@@ -324,3 +324,21 @@ RESET shared_detoast;
 SELECT injection_points_detach('detoast-attr-external');
 SELECT injection_points_detach('detoast-attr-compressed');
 DROP TABLE sd;
+
+-- A slot refilled through a path other than ExecStore*/ExecClearTuple must
+-- drop its copies too: a multi-batch hash join re-reads the probe side's
+-- tuples from a batch file with ExecForceStoreMinimalTuple into a slot whose
+-- previous copy would otherwise satisfy the hash clause for every following
+-- tuple.  A CTE scan returns minimal tuples, which takes that path.
+CREATE TABLE hb (id int, txt text);
+ALTER TABLE hb ALTER COLUMN txt SET STORAGE EXTERNAL;
+INSERT INTO hb SELECT i, 'v' || i || repeat(md5(i::text), 80) FROM generate_series(1, 4000) i;
+CREATE TABLE hb2 (id int, txt text);
+ALTER TABLE hb2 ALTER COLUMN txt SET STORAGE EXTERNAL;
+INSERT INTO hb2 SELECT id, txt FROM hb WHERE id <= 3000;
+VACUUM ANALYZE hb, hb2;
+SET work_mem = '64kB'; SET enable_nestloop = off; SET enable_mergejoin = off;
+EXPLAIN (VERBOSE, COSTS OFF) WITH o AS MATERIALIZED (SELECT txt FROM hb) SELECT count(*) FROM o JOIN hb2 i ON o.txt = i.txt;
+WITH o AS MATERIALIZED (SELECT txt FROM hb) SELECT count(*) FROM o JOIN hb2 i ON o.txt = i.txt;
+RESET work_mem; RESET enable_nestloop; RESET enable_mergejoin;
+DROP TABLE hb, hb2;

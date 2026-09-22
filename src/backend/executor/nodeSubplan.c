@@ -346,6 +346,7 @@ ExecScanSubPlan(SubPlanState *node,
 				Assert(prmdata->execPlan == NULL);
 				prmdata->value = heap_getattr(node->curTuple, col, tdesc,
 											  &(prmdata->isnull));
+				prmdata->detoast_slot = NULL;
 				col++;
 			}
 
@@ -390,6 +391,7 @@ ExecScanSubPlan(SubPlanState *node,
 			prmdata = &(econtext->ecxt_param_exec_vals[paramid]);
 			Assert(prmdata->execPlan == NULL);
 			prmdata->value = slot_getattr(slot, col, &(prmdata->isnull));
+			prmdata->detoast_slot = NULL;
 			col++;
 		}
 
@@ -459,6 +461,7 @@ ExecScanSubPlan(SubPlanState *node,
 				prmdata = &(econtext->ecxt_param_exec_vals[paramid]);
 				Assert(prmdata->execPlan == NULL);
 				prmdata->value = (Datum) 0;
+				prmdata->detoast_slot = NULL;
 				prmdata->isnull = true;
 			}
 		}
@@ -594,6 +597,7 @@ buildSubPlanHash(SubPlanState *node, ExprContext *econtext)
 			Assert(prmdata->execPlan == NULL);
 			prmdata->value = slot_getattr(slot, col,
 										  &(prmdata->isnull));
+			prmdata->detoast_slot = NULL;
 			col++;
 		}
 		slot = ExecProject(node->projRight);

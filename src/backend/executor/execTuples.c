@@ -409,6 +409,9 @@ tts_heap_materialize(TupleTableSlot *slot)
 	HeapTupleTableSlot *hslot = (HeapTupleTableSlot *) slot;
 	MemoryContext oldContext;
 
+	/* see tts_virtual_materialize: carried detoasted copies must go */
+	ExecSlotResetDetoast(slot);
+
 	Assert(!TTS_EMPTY(slot));
 
 	/* If slot has its tuple already materialized, nothing to do. */
@@ -495,6 +498,9 @@ static void
 tts_heap_store_tuple(TupleTableSlot *slot, HeapTuple tuple, bool shouldFree)
 {
 	HeapTupleTableSlot *hslot = (HeapTupleTableSlot *) slot;
+
+	/* the slot moves on to another tuple; drop its detoasted copies */
+	ExecSlotResetDetoast(slot);
 
 	tts_heap_clear(slot);
 
@@ -597,6 +603,9 @@ tts_minimal_materialize(TupleTableSlot *slot)
 	MinimalTupleTableSlot *mslot = (MinimalTupleTableSlot *) slot;
 	MemoryContext oldContext;
 
+	/* see tts_virtual_materialize: carried detoasted copies must go */
+	ExecSlotResetDetoast(slot);
+
 	Assert(!TTS_EMPTY(slot));
 
 	/* If slot has its tuple already materialized, nothing to do. */
@@ -690,6 +699,9 @@ static void
 tts_minimal_store_tuple(TupleTableSlot *slot, MinimalTuple mtup, bool shouldFree)
 {
 	MinimalTupleTableSlot *mslot = (MinimalTupleTableSlot *) slot;
+
+	/* the slot moves on to another tuple; drop its detoasted copies */
+	ExecSlotResetDetoast(slot);
 
 	tts_minimal_clear(slot);
 
@@ -813,6 +825,9 @@ tts_buffer_heap_materialize(TupleTableSlot *slot)
 {
 	BufferHeapTupleTableSlot *bslot = (BufferHeapTupleTableSlot *) slot;
 	MemoryContext oldContext;
+
+	/* see tts_virtual_materialize: carried detoasted copies must go */
+	ExecSlotResetDetoast(slot);
 
 	Assert(!TTS_EMPTY(slot));
 
@@ -1661,7 +1676,6 @@ ExecStoreHeapTuple(HeapTuple tuple,
 
 	if (unlikely(!TTS_IS_HEAPTUPLE(slot)))
 		elog(ERROR, "trying to store a heap tuple into wrong type of slot");
-	ExecSlotResetDetoast(slot);
 	tts_heap_store_tuple(slot, tuple, shouldFree);
 
 	slot->tts_tableOid = tuple->t_tableOid;
@@ -1756,7 +1770,6 @@ ExecStoreMinimalTuple(MinimalTuple mtup,
 
 	if (unlikely(!TTS_IS_MINIMALTUPLE(slot)))
 		elog(ERROR, "trying to store a minimal tuple into wrong type of slot");
-	ExecSlotResetDetoast(slot);
 	tts_minimal_store_tuple(slot, mtup, shouldFree);
 
 	return slot;

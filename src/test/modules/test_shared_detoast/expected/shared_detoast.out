@@ -377,6 +377,7 @@ EXPLAIN (VERBOSE, COSTS OFF) SELECT count(*) FROM sd p JOIN sd2 q ON p.doc = q.d
 SELECT count(*) FROM sd p JOIN sd2 q ON p.doc = q.doc AND p.doc ? (q.doc->>'k1');
 NOTICE:  notice triggered for injection point detoast-attr-external
 NOTICE:  notice triggered for injection point detoast-attr-external
+NOTICE:  notice triggered for injection point detoast-attr-external
  count 
 -------
      0
@@ -998,3 +999,43 @@ SELECT injection_points_detach('detoast-attr-compressed');
 (1 row)
 
 DROP TABLE sd;
+-- A slot refilled through a path other than ExecStore*/ExecClearTuple must
+-- drop its copies too: a multi-batch hash join re-reads the probe side's
+-- tuples from a batch file with ExecForceStoreMinimalTuple into a slot whose
+-- previous copy would otherwise satisfy the hash clause for every following
+-- tuple.  A CTE scan returns minimal tuples, which takes that path.
+CREATE TABLE hb (id int, txt text);
+ALTER TABLE hb ALTER COLUMN txt SET STORAGE EXTERNAL;
+INSERT INTO hb SELECT i, 'v' || i || repeat(md5(i::text), 80) FROM generate_series(1, 4000) i;
+CREATE TABLE hb2 (id int, txt text);
+ALTER TABLE hb2 ALTER COLUMN txt SET STORAGE EXTERNAL;
+INSERT INTO hb2 SELECT id, txt FROM hb WHERE id <= 3000;
+VACUUM ANALYZE hb, hb2;
+SET work_mem = '64kB'; SET enable_nestloop = off; SET enable_mergejoin = off;
+EXPLAIN (VERBOSE, COSTS OFF) WITH o AS MATERIALIZED (SELECT txt FROM hb) SELECT count(*) FROM o JOIN hb2 i ON o.txt = i.txt;
+                 QUERY PLAN                 
+--------------------------------------------
+ Aggregate
+   Output: count(*)
+   CTE o
+     ->  Seq Scan on public.hb
+           Output: hb.txt
+   ->  Hash Join
+         Hash Cond: (o.txt = i.txt)
+         Pre-detoast Outer: o.txt
+         ->  CTE Scan on o
+               Output: o.txt
+         ->  Hash
+               Output: i.txt
+               ->  Seq Scan on public.hb2 i
+                     Output: i.txt
+(14 rows)
+
+WITH o AS MATERIALIZED (SELECT txt FROM hb) SELECT count(*) FROM o JOIN hb2 i ON o.txt = i.txt;
+ count 
+-------
+  3000
+(1 row)
+
+RESET work_mem; RESET enable_nestloop; RESET enable_mergejoin;
+DROP TABLE hb, hb2;
