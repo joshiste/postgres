@@ -1,0 +1,2810 @@
+From 7d17a8c9110b7e944a6431887c9cd38a4d44d8b2 Mon Sep 17 00:00:00 2001
+From: "yizhi.fzh" <yizhi.fzh@alibaba-inc.com>
+Date: Sun, 3 Mar 2024 13:48:25 +0800
+Subject: [PATCH v10 1/1] shared detoast datum
+
+See the overall design & alternative design & testing in
+
+src/backend/executor/shared_detoast_datum.org
+---
+ src/backend/access/common/detoast.c           |  68 ++-
+ src/backend/access/common/toast_compression.c |  10 +-
+ src/backend/executor/execExpr.c               |  60 +-
+ src/backend/executor/execExprInterp.c         | 179 ++++++
+ src/backend/executor/execTuples.c             | 131 ++++
+ src/backend/executor/execUtils.c              |   2 +
+ src/backend/executor/nodeHashjoin.c           |   2 +
+ src/backend/executor/nodeMergejoin.c          |   2 +
+ src/backend/executor/nodeNestloop.c           |   1 +
+ src/backend/executor/shared_detoast_datum.org | 264 ++++++++
+ src/backend/jit/llvm/llvmjit_expr.c           |  26 +-
+ src/backend/jit/llvm/llvmjit_types.c          |   1 +
+ src/backend/optimizer/plan/createplan.c       | 107 +++-
+ src/backend/optimizer/plan/setrefs.c          | 577 +++++++++++++++---
+ src/include/access/detoast.h                  |   3 +
+ src/include/access/toast_compression.h        |   4 +-
+ src/include/executor/execExpr.h               |  12 +
+ src/include/executor/tuptable.h               |  14 +
+ src/include/nodes/execnodes.h                 |  14 +
+ src/include/nodes/plannodes.h                 |  53 ++
+ src/tools/pgindent/typedefs.list              |   2 +
+ 21 files changed, 1393 insertions(+), 139 deletions(-)
+ create mode 100644 src/backend/executor/shared_detoast_datum.org
+
+diff --git a/src/backend/access/common/detoast.c b/src/backend/access/common/detoast.c
+index 3547cdba56..acc9644689 100644
+--- a/src/backend/access/common/detoast.c
++++ b/src/backend/access/common/detoast.c
+@@ -22,11 +22,11 @@
+ #include "utils/expandeddatum.h"
+ #include "utils/rel.h"
+ 
+-static struct varlena *toast_fetch_datum(struct varlena *attr);
++static struct varlena *toast_fetch_datum(struct varlena *attr, MemoryContext ctx);
+ static struct varlena *toast_fetch_datum_slice(struct varlena *attr,
+ 											   int32 sliceoffset,
+ 											   int32 slicelength);
+-static struct varlena *toast_decompress_datum(struct varlena *attr);
++static struct varlena *toast_decompress_datum(struct varlena *attr, MemoryContext ctx);
+ static struct varlena *toast_decompress_datum_slice(struct varlena *attr, int32 slicelength);
+ 
+ /* ----------
+@@ -42,7 +42,7 @@ static struct varlena *toast_decompress_datum_slice(struct varlena *attr, int32
+  * ----------
+  */
+ struct varlena *
+-detoast_external_attr(struct varlena *attr)
++detoast_external_attr_ext(struct varlena *attr, MemoryContext ctx)
+ {
+ 	struct varlena *result;
+ 
+@@ -51,7 +51,7 @@ detoast_external_attr(struct varlena *attr)
+ 		/*
+ 		 * This is an external stored plain value
+ 		 */
+-		result = toast_fetch_datum(attr);
++		result = toast_fetch_datum(attr, ctx);
+ 	}
+ 	else if (VARATT_IS_EXTERNAL_INDIRECT(attr))
+ 	{
+@@ -68,13 +68,13 @@ detoast_external_attr(struct varlena *attr)
+ 
+ 		/* recurse if value is still external in some other way */
+ 		if (VARATT_IS_EXTERNAL(attr))
+-			return detoast_external_attr(attr);
++			return detoast_external_attr_ext(attr, ctx);
+ 
+ 		/*
+ 		 * Copy into the caller's memory context, in case caller tries to
+ 		 * pfree the result.
+ 		 */
+-		result = (struct varlena *) palloc(VARSIZE_ANY(attr));
++		result = (struct varlena *) MemoryContextAlloc(ctx, VARSIZE_ANY(attr));
+ 		memcpy(result, attr, VARSIZE_ANY(attr));
+ 	}
+ 	else if (VARATT_IS_EXTERNAL_EXPANDED(attr))
+@@ -87,7 +87,7 @@ detoast_external_attr(struct varlena *attr)
+ 
+ 		eoh = DatumGetEOHP(PointerGetDatum(attr));
+ 		resultsize = EOH_get_flat_size(eoh);
+-		result = (struct varlena *) palloc(resultsize);
++		result = (struct varlena *) MemoryContextAlloc(ctx, resultsize);
+ 		EOH_flatten_into(eoh, (void *) result, resultsize);
+ 	}
+ 	else
+@@ -101,32 +101,45 @@ detoast_external_attr(struct varlena *attr)
+ 	return result;
+ }
+ 
++struct varlena *
++detoast_external_attr(struct varlena *attr)
++{
++	return detoast_external_attr_ext(attr, CurrentMemoryContext);
++}
++
+ 
+ /* ----------
+- * detoast_attr -
++ * detoast_attr_ext -
+  *
+  *	Public entry point to get back a toasted value from compression
+  *	or external storage.  The result is always non-extended varlena form.
+  *
++ * ctx: The memory context which the final value belongs to.
++ *
+  * Note some callers assume that if the input is an EXTERNAL or COMPRESSED
+  * datum, the result will be a pfree'able chunk.
+  * ----------
+  */
+-struct varlena *
+-detoast_attr(struct varlena *attr)
++
++extern struct varlena *
++detoast_attr_ext(struct varlena *attr, MemoryContext ctx)
+ {
+ 	if (VARATT_IS_EXTERNAL_ONDISK(attr))
+ 	{
+ 		/*
+ 		 * This is an externally stored datum --- fetch it back from there
+ 		 */
+-		attr = toast_fetch_datum(attr);
++		attr = toast_fetch_datum(attr, ctx);
+ 		/* If it's compressed, decompress it */
+ 		if (VARATT_IS_COMPRESSED(attr))
+ 		{
+ 			struct varlena *tmp = attr;
+ 
+-			attr = toast_decompress_datum(tmp);
++			attr = toast_decompress_datum(tmp, ctx);
++			/*
++			 * XXX: this pfree block us from using BumpContext directly
++			 * we need some extra effort to make it happen at least.
++			 */
+ 			pfree(tmp);
+ 		}
+ 	}
+@@ -144,14 +157,14 @@ detoast_attr(struct varlena *attr)
+ 		Assert(!VARATT_IS_EXTERNAL_INDIRECT(attr));
+ 
+ 		/* recurse in case value is still extended in some other way */
+-		attr = detoast_attr(attr);
++		attr = detoast_attr_ext(attr, ctx);
+ 
+ 		/* if it isn't, we'd better copy it */
+ 		if (attr == (struct varlena *) redirect.pointer)
+ 		{
+ 			struct varlena *result;
+ 
+-			result = (struct varlena *) palloc(VARSIZE_ANY(attr));
++			result = (struct varlena *) MemoryContextAlloc(ctx, VARSIZE_ANY(attr));
+ 			memcpy(result, attr, VARSIZE_ANY(attr));
+ 			attr = result;
+ 		}
+@@ -161,7 +174,7 @@ detoast_attr(struct varlena *attr)
+ 		/*
+ 		 * This is an expanded-object pointer --- get flat format
+ 		 */
+-		attr = detoast_external_attr(attr);
++		attr = detoast_external_attr_ext(attr, ctx);
+ 		/* flatteners are not allowed to produce compressed/short output */
+ 		Assert(!VARATT_IS_EXTENDED(attr));
+ 	}
+@@ -170,7 +183,7 @@ detoast_attr(struct varlena *attr)
+ 		/*
+ 		 * This is a compressed value inside of the main tuple
+ 		 */
+-		attr = toast_decompress_datum(attr);
++		attr = toast_decompress_datum(attr, ctx);
+ 	}
+ 	else if (VARATT_IS_SHORT(attr))
+ 	{
+@@ -181,7 +194,7 @@ detoast_attr(struct varlena *attr)
+ 		Size		new_size = data_size + VARHDRSZ;
+ 		struct varlena *new_attr;
+ 
+-		new_attr = (struct varlena *) palloc(new_size);
++		new_attr = (struct varlena *) MemoryContextAlloc(ctx, new_size);
+ 		SET_VARSIZE(new_attr, new_size);
+ 		memcpy(VARDATA(new_attr), VARDATA_SHORT(attr), data_size);
+ 		attr = new_attr;
+@@ -190,6 +203,11 @@ detoast_attr(struct varlena *attr)
+ 	return attr;
+ }
+ 
++struct varlena *
++detoast_attr(struct varlena *attr)
++{
++	return detoast_attr_ext(attr, CurrentMemoryContext);
++}
+ 
+ /* ----------
+  * detoast_attr_slice -
+@@ -262,7 +280,7 @@ detoast_attr_slice(struct varlena *attr,
+ 			preslice = toast_fetch_datum_slice(attr, 0, max_size);
+ 		}
+ 		else
+-			preslice = toast_fetch_datum(attr);
++			preslice = toast_fetch_datum(attr, CurrentMemoryContext);
+ 	}
+ 	else if (VARATT_IS_EXTERNAL_INDIRECT(attr))
+ 	{
+@@ -294,7 +312,7 @@ detoast_attr_slice(struct varlena *attr,
+ 		if (slicelimit >= 0)
+ 			preslice = toast_decompress_datum_slice(tmp, slicelimit);
+ 		else
+-			preslice = toast_decompress_datum(tmp);
++			preslice = toast_decompress_datum(tmp, CurrentMemoryContext);
+ 
+ 		if (tmp != attr)
+ 			pfree(tmp);
+@@ -340,7 +358,7 @@ detoast_attr_slice(struct varlena *attr,
+  * ----------
+  */
+ static struct varlena *
+-toast_fetch_datum(struct varlena *attr)
++toast_fetch_datum(struct varlena *attr, MemoryContext ctx)
+ {
+ 	Relation	toastrel;
+ 	struct varlena *result;
+@@ -355,7 +373,7 @@ toast_fetch_datum(struct varlena *attr)
+ 
+ 	attrsize = VARATT_EXTERNAL_GET_EXTSIZE(toast_pointer);
+ 
+-	result = (struct varlena *) palloc(attrsize + VARHDRSZ);
++	result = (struct varlena *) MemoryContextAlloc(ctx, attrsize + VARHDRSZ);
+ 
+ 	if (VARATT_EXTERNAL_IS_COMPRESSED(toast_pointer))
+ 		SET_VARSIZE_COMPRESSED(result, attrsize + VARHDRSZ);
+@@ -468,7 +486,7 @@ toast_fetch_datum_slice(struct varlena *attr, int32 sliceoffset,
+  * Decompress a compressed version of a varlena datum
+  */
+ static struct varlena *
+-toast_decompress_datum(struct varlena *attr)
++toast_decompress_datum(struct varlena *attr, MemoryContext ctx)
+ {
+ 	ToastCompressionId cmid;
+ 
+@@ -482,9 +500,9 @@ toast_decompress_datum(struct varlena *attr)
+ 	switch (cmid)
+ 	{
+ 		case TOAST_PGLZ_COMPRESSION_ID:
+-			return pglz_decompress_datum(attr);
++			return pglz_decompress_datum(attr, ctx);
+ 		case TOAST_LZ4_COMPRESSION_ID:
+-			return lz4_decompress_datum(attr);
++			return lz4_decompress_datum(attr, ctx);
+ 		default:
+ 			elog(ERROR, "invalid compression method id %d", cmid);
+ 			return NULL;		/* keep compiler quiet */
+@@ -515,7 +533,7 @@ toast_decompress_datum_slice(struct varlena *attr, int32 slicelength)
+ 	 * more than the data's true decompressed size.
+ 	 */
+ 	if ((uint32) slicelength >= TOAST_COMPRESS_EXTSIZE(attr))
+-		return toast_decompress_datum(attr);
++		return toast_decompress_datum(attr, CurrentMemoryContext);
+ 
+ 	/*
+ 	 * Fetch the compression method id stored in the compression header and
+diff --git a/src/backend/access/common/toast_compression.c b/src/backend/access/common/toast_compression.c
+index 52230f31c6..1189faf264 100644
+--- a/src/backend/access/common/toast_compression.c
++++ b/src/backend/access/common/toast_compression.c
+@@ -79,13 +79,13 @@ pglz_compress_datum(const struct varlena *value)
+  * Decompress a varlena that was compressed using PGLZ.
+  */
+ struct varlena *
+-pglz_decompress_datum(const struct varlena *value)
++pglz_decompress_datum(const struct varlena *value, MemoryContext ctx)
+ {
+ 	struct varlena *result;
+ 	int32		rawsize;
+ 
+ 	/* allocate memory for the uncompressed data */
+-	result = (struct varlena *) palloc(VARDATA_COMPRESSED_GET_EXTSIZE(value) + VARHDRSZ);
++	result = (struct varlena *) MemoryContextAlloc(ctx, VARDATA_COMPRESSED_GET_EXTSIZE(value) + VARHDRSZ);
+ 
+ 	/* decompress the data */
+ 	rawsize = pglz_decompress((char *) value + VARHDRSZ_COMPRESSED,
+@@ -179,7 +179,7 @@ lz4_compress_datum(const struct varlena *value)
+  * Decompress a varlena that was compressed using LZ4.
+  */
+ struct varlena *
+-lz4_decompress_datum(const struct varlena *value)
++lz4_decompress_datum(const struct varlena *value, MemoryContext ctx)
+ {
+ #ifndef USE_LZ4
+ 	NO_LZ4_SUPPORT();
+@@ -189,7 +189,7 @@ lz4_decompress_datum(const struct varlena *value)
+ 	struct varlena *result;
+ 
+ 	/* allocate memory for the uncompressed data */
+-	result = (struct varlena *) palloc(VARDATA_COMPRESSED_GET_EXTSIZE(value) + VARHDRSZ);
++	result = (struct varlena *) MemoryContextAlloc(ctx, VARDATA_COMPRESSED_GET_EXTSIZE(value) + VARHDRSZ);
+ 
+ 	/* decompress the data */
+ 	rawsize = LZ4_decompress_safe((char *) value + VARHDRSZ_COMPRESSED,
+@@ -223,7 +223,7 @@ lz4_decompress_datum_slice(const struct varlena *value, int32 slicelength)
+ 
+ 	/* slice decompression not supported prior to 1.8.3 */
+ 	if (LZ4_versionNumber() < 10803)
+-		return lz4_decompress_datum(value);
++		return lz4_decompress_datum(value, CurrentMemoryContext);
+ 
+ 	/* allocate memory for the uncompressed data */
+ 	result = (struct varlena *) palloc(slicelength + VARHDRSZ);
+diff --git a/src/backend/executor/execExpr.c b/src/backend/executor/execExpr.c
+index b9ebc827a7..7b4742bf8e 100644
+--- a/src/backend/executor/execExpr.c
++++ b/src/backend/executor/execExpr.c
+@@ -938,22 +938,76 @@ ExecInitExprRec(Expr *node, ExprState *state,
+ 				}
+ 				else
+ 				{
++					int			attnum;
++					Plan	   *plan = state->parent ? state->parent->plan : NULL;
++
+ 					/* regular user column */
+ 					scratch.d.var.attnum = variable->varattno - 1;
+ 					scratch.d.var.vartype = variable->vartype;
++					attnum = scratch.d.var.attnum;
++
+ 					switch (variable->varno)
+ 					{
+ 						case INNER_VAR:
+-							scratch.opcode = EEOP_INNER_VAR;
++
++							if (is_join_plan(plan) &&
++								bms_is_member(attnum,
++											  ((JoinState *) state->parent)->inner_pre_detoast_attrs))
++							{
++								scratch.opcode = EEOP_INNER_VAR_TOAST;
++#ifdef DEBUG_PRE_DETOAST_DATUM
++								elog(INFO,
++									 "EEOP_INNER_VAR_TOAST: flags = %d costs=%.2f..%.2f, attnum: %d",
++									 state->flags,
++									 plan->startup_cost,
++									 plan->total_cost,
++									 attnum);
++#endif
++							}
++							else
++							{
++								scratch.opcode = EEOP_INNER_VAR;
++							}
+ 							break;
+ 						case OUTER_VAR:
+-							scratch.opcode = EEOP_OUTER_VAR;
++							if (is_join_plan(plan) &&
++								bms_is_member(attnum,
++											  ((JoinState *) state->parent)->outer_pre_detoast_attrs))
++							{
++								scratch.opcode = EEOP_OUTER_VAR_TOAST;
++#ifdef DEBUG_PRE_DETOAST_DATUM
++									elog(INFO,
++										 "EEOP_OUTER_VAR_TOAST: flags = %u costs=%.2f..%.2f, attnum: %d",
++										 state->flags,
++										 plan->startup_cost,
++										 plan->total_cost,
++										 attnum);
++#endif
++							}
++							else
++								scratch.opcode = EEOP_OUTER_VAR;
+ 							break;
+ 
+ 							/* INDEX_VAR is handled by default case */
+ 
+ 						default:
+-							scratch.opcode = EEOP_SCAN_VAR;
++							if (is_scan_plan(plan) && bms_is_member(
++																	attnum,
++																	((ScanState *) state->parent)->scan_pre_detoast_attrs))
++							{
++								scratch.opcode = EEOP_SCAN_VAR_TOAST;
++#ifdef DEBUG_PRE_DETOAST_DATUM
++									elog(INFO,
++										 "EEOP_SCAN_VAR_TOAST: flags = %u costs=%.2f..%.2f, scanId: %d, attnum: %d",
++										 state->flags,
++										 plan->startup_cost,
++										 plan->total_cost,
++										 ((Scan *) plan)->scanrelid,
++										 attnum);
++#endif
++							}
++							else
++								scratch.opcode = EEOP_SCAN_VAR;
+ 							break;
+ 					}
+ 				}
+diff --git a/src/backend/executor/execExprInterp.c b/src/backend/executor/execExprInterp.c
+index 852186312c..df932dc7c1 100644
+--- a/src/backend/executor/execExprInterp.c
++++ b/src/backend/executor/execExprInterp.c
+@@ -57,6 +57,7 @@
+ #include "postgres.h"
+ 
+ #include "access/heaptoast.h"
++#include "access/detoast.h"
+ #include "catalog/pg_type.h"
+ #include "commands/sequence.h"
+ #include "executor/execExpr.h"
+@@ -157,6 +158,9 @@ static void ExecEvalRowNullInt(ExprState *state, ExprEvalStep *op,
+ static Datum ExecJustInnerVar(ExprState *state, ExprContext *econtext, bool *isnull);
+ static Datum ExecJustOuterVar(ExprState *state, ExprContext *econtext, bool *isnull);
+ static Datum ExecJustScanVar(ExprState *state, ExprContext *econtext, bool *isnull);
++static Datum ExecJustInnerVarToast(ExprState *state, ExprContext *econtext, bool *isnull);
++static Datum ExecJustOuterVarToast(ExprState *state, ExprContext *econtext, bool *isnull);
++static Datum ExecJustScanVarToast(ExprState *state, ExprContext *econtext, bool *isnull);
+ static Datum ExecJustAssignInnerVar(ExprState *state, ExprContext *econtext, bool *isnull);
+ static Datum ExecJustAssignOuterVar(ExprState *state, ExprContext *econtext, bool *isnull);
+ static Datum ExecJustAssignScanVar(ExprState *state, ExprContext *econtext, bool *isnull);
+@@ -165,6 +169,9 @@ static Datum ExecJustConst(ExprState *state, ExprContext *econtext, bool *isnull
+ static Datum ExecJustInnerVarVirt(ExprState *state, ExprContext *econtext, bool *isnull);
+ static Datum ExecJustOuterVarVirt(ExprState *state, ExprContext *econtext, bool *isnull);
+ static Datum ExecJustScanVarVirt(ExprState *state, ExprContext *econtext, bool *isnull);
++static Datum ExecJustInnerVarVirtToast(ExprState *state, ExprContext *econtext, bool *isnull);
++static Datum ExecJustOuterVarVirtToast(ExprState *state, ExprContext *econtext, bool *isnull);
++static Datum ExecJustScanVarVirtToast(ExprState *state, ExprContext *econtext, bool *isnull);
+ static Datum ExecJustAssignInnerVarVirt(ExprState *state, ExprContext *econtext, bool *isnull);
+ static Datum ExecJustAssignOuterVarVirt(ExprState *state, ExprContext *econtext, bool *isnull);
+ static Datum ExecJustAssignScanVarVirt(ExprState *state, ExprContext *econtext, bool *isnull);
+@@ -181,6 +188,42 @@ static pg_attribute_always_inline void ExecAggPlainTransByRef(AggState *aggstate
+ 															  ExprContext *aggcontext,
+ 															  int setno);
+ static char *ExecGetJsonValueItemString(JsonbValue *item, bool *resnull);
++static inline void
++ExecSlotDetoastDatum(TupleTableSlot *slot, int attnum)
++{
++	if (!slot->tts_isnull[attnum] &&
++		VARATT_IS_EXTENDED(slot->tts_values[attnum]))
++	{
++		if (unlikely(slot->tts_data_mctx == NULL))
++			slot->tts_data_mctx = GenerationContextCreate(slot->tts_mcxt,
++														  "tts_value_ctx",
++														  ALLOCSET_START_SMALL_SIZES);
++		slot->tts_values[attnum] = PointerGetDatum(detoast_attr_ext(
++													   (struct varlena *) slot->tts_values[attnum],
++													   /* save the detoast value to the given MemoryContext. */
++													   slot->tts_data_mctx));
++		Assert(slot->tts_nvalid > attnum);
++	}
++}
++
++/* JIT requires a non-static (and external?) function */
++void
++ExecSlotDetoastDatumExternal(TupleTableSlot *slot, int attnum)
++{
++	return ExecSlotDetoastDatum(slot, attnum);
++}
++
++
++static inline void
++ExecEvalToastVar(TupleTableSlot *slot,
++				 ExprEvalStep *op,
++				 int attnum)
++{
++	ExecSlotDetoastDatum(slot, attnum);
++
++	*op->resvalue = slot->tts_values[attnum];
++	*op->resnull = slot->tts_isnull[attnum];
++}
+ 
+ /*
+  * ScalarArrayOpExprHashEntry
+@@ -296,6 +339,24 @@ ExecReadyInterpretedExpr(ExprState *state)
+ 			state->evalfunc_private = (void *) ExecJustScanVar;
+ 			return;
+ 		}
++		if (step0 == EEOP_INNER_FETCHSOME &&
++			step1 == EEOP_INNER_VAR_TOAST)
++		{
++			state->evalfunc_private = (void *) ExecJustInnerVarToast;
++			return;
++		}
++		else if (step0 == EEOP_OUTER_FETCHSOME &&
++				 step1 == EEOP_OUTER_VAR_TOAST)
++		{
++			state->evalfunc_private = (void *) ExecJustOuterVarToast;
++			return;
++		}
++		else if (step0 == EEOP_SCAN_FETCHSOME &&
++				 step1 == EEOP_SCAN_VAR_TOAST)
++		{
++			state->evalfunc_private = (void *) ExecJustScanVarToast;
++			return;
++		}
+ 		else if (step0 == EEOP_INNER_FETCHSOME &&
+ 				 step1 == EEOP_ASSIGN_INNER_VAR)
+ 		{
+@@ -346,6 +407,21 @@ ExecReadyInterpretedExpr(ExprState *state)
+ 			state->evalfunc_private = (void *) ExecJustScanVarVirt;
+ 			return;
+ 		}
++		else if (step0 == EEOP_INNER_VAR_TOAST)
++		{
++			state->evalfunc_private = (void *) ExecJustInnerVarVirtToast;
++			return;
++		}
++		else if (step0 == EEOP_OUTER_VAR_TOAST)
++		{
++			state->evalfunc_private = (void *) ExecJustOuterVarVirtToast;
++			return;
++		}
++		else if (step0 == EEOP_SCAN_VAR_TOAST)
++		{
++			state->evalfunc_private = (void *) ExecJustScanVarVirtToast;
++			return;
++		}
+ 		else if (step0 == EEOP_ASSIGN_INNER_VAR)
+ 		{
+ 			state->evalfunc_private = (void *) ExecJustAssignInnerVarVirt;
+@@ -413,6 +489,9 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
+ 		&&CASE_EEOP_INNER_VAR,
+ 		&&CASE_EEOP_OUTER_VAR,
+ 		&&CASE_EEOP_SCAN_VAR,
++		&&CASE_EEOP_INNER_VAR_TOAST,
++		&&CASE_EEOP_OUTER_VAR_TOAST,
++		&&CASE_EEOP_SCAN_VAR_TOAST,
+ 		&&CASE_EEOP_INNER_SYSVAR,
+ 		&&CASE_EEOP_OUTER_SYSVAR,
+ 		&&CASE_EEOP_SCAN_SYSVAR,
+@@ -601,6 +680,25 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
+ 			Assert(attnum >= 0 && attnum < scanslot->tts_nvalid);
+ 			*op->resvalue = scanslot->tts_values[attnum];
+ 			*op->resnull = scanslot->tts_isnull[attnum];
++			EEO_NEXT();
++		}
++
++		EEO_CASE(EEOP_INNER_VAR_TOAST)
++		{
++			ExecEvalToastVar(innerslot, op, op->d.var.attnum);
++			EEO_NEXT();
++		}
++
++		EEO_CASE(EEOP_OUTER_VAR_TOAST)
++		{
++			ExecEvalToastVar(outerslot, op, op->d.var.attnum);
++
++			EEO_NEXT();
++		}
++
++		EEO_CASE(EEOP_SCAN_VAR_TOAST)
++		{
++			ExecEvalToastVar(scanslot, op, op->d.var.attnum);
+ 
+ 			EEO_NEXT();
+ 		}
+@@ -2171,6 +2269,42 @@ ExecJustScanVar(ExprState *state, ExprContext *econtext, bool *isnull)
+ 	return ExecJustVarImpl(state, econtext->ecxt_scantuple, isnull);
+ }
+ 
++static pg_attribute_always_inline Datum
++ExecJustVarImplToast(ExprState *state, TupleTableSlot *slot, bool *isnull)
++{
++	ExprEvalStep *op = &state->steps[1];
++	int			attnum = op->d.var.attnum;
++
++	CheckOpSlotCompatibility(&state->steps[0], slot);
++
++	slot_getattr(slot, attnum + 1, isnull);
++
++	ExecSlotDetoastDatum(slot, attnum);
++
++	return slot->tts_values[attnum];
++}
++
++/* Simple reference to inner Var */
++static Datum
++ExecJustInnerVarToast(ExprState *state, ExprContext *econtext, bool *isnull)
++{
++	return ExecJustVarImplToast(state, econtext->ecxt_innertuple, isnull);
++}
++
++/* Simple reference to outer Var */
++static Datum
++ExecJustOuterVarToast(ExprState *state, ExprContext *econtext, bool *isnull)
++{
++	return ExecJustVarImplToast(state, econtext->ecxt_outertuple, isnull);
++}
++
++/* Simple reference to scan Var */
++static Datum
++ExecJustScanVarToast(ExprState *state, ExprContext *econtext, bool *isnull)
++{
++	return ExecJustVarImplToast(state, econtext->ecxt_scantuple, isnull);
++}
++
+ /* implementation of ExecJustAssign(Inner|Outer|Scan)Var */
+ static pg_attribute_always_inline Datum
+ ExecJustAssignVarImpl(ExprState *state, TupleTableSlot *inslot, bool *isnull)
+@@ -2309,6 +2443,51 @@ ExecJustScanVarVirt(ExprState *state, ExprContext *econtext, bool *isnull)
+ 	return ExecJustVarVirtImpl(state, econtext->ecxt_scantuple, isnull);
+ }
+ 
++/* implementation of ExecJust(Inner|Outer|Scan)VarVirt */
++static pg_attribute_always_inline Datum
++ExecJustVarVirtImplToast(ExprState *state, TupleTableSlot *slot, bool *isnull)
++{
++	ExprEvalStep *op = &state->steps[0];
++	int			attnum = op->d.var.attnum;
++
++	/*
++	 * As it is guaranteed that a virtual slot is used, there never is a need
++	 * to perform tuple deforming (nor would it be possible). Therefore
++	 * execExpr.c has not emitted an EEOP_*_FETCHSOME step. Verify, as much as
++	 * possible, that that determination was accurate.
++	 */
++	Assert(TTS_IS_VIRTUAL(slot));
++	Assert(TTS_FIXED(slot));
++	Assert(attnum >= 0 && attnum < slot->tts_nvalid);
++
++	*isnull = slot->tts_isnull[attnum];
++
++	ExecSlotDetoastDatum(slot, attnum);
++
++	return slot->tts_values[attnum];
++}
++
++/* Like ExecJustInnerVar, optimized for virtual slots */
++static Datum
++ExecJustInnerVarVirtToast(ExprState *state, ExprContext *econtext, bool *isnull)
++{
++	return ExecJustVarVirtImplToast(state, econtext->ecxt_innertuple, isnull);
++}
++
++/* Like ExecJustOuterVar, optimized for virtual slots */
++static Datum
++ExecJustOuterVarVirtToast(ExprState *state, ExprContext *econtext, bool *isnull)
++{
++	return ExecJustVarVirtImplToast(state, econtext->ecxt_outertuple, isnull);
++}
++
++/* Like ExecJustScanVar, optimized for virtual slots */
++static Datum
++ExecJustScanVarVirtToast(ExprState *state, ExprContext *econtext, bool *isnull)
++{
++	return ExecJustVarVirtImplToast(state, econtext->ecxt_scantuple, isnull);
++}
++
+ /* implementation of ExecJustAssign(Inner|Outer|Scan)VarVirt */
+ static pg_attribute_always_inline Datum
+ ExecJustAssignVarVirtImpl(ExprState *state, TupleTableSlot *inslot, bool *isnull)
+diff --git a/src/backend/executor/execTuples.c b/src/backend/executor/execTuples.c
+index 00dc339615..4b3e799574 100644
+--- a/src/backend/executor/execTuples.c
++++ b/src/backend/executor/execTuples.c
+@@ -80,6 +80,9 @@ static inline void tts_buffer_heap_store_tuple(TupleTableSlot *slot,
+ 											   bool transfer_pin);
+ static void tts_heap_store_tuple(TupleTableSlot *slot, HeapTuple tuple, bool shouldFree);
+ 
++static Bitmapset *cal_final_pre_detoast_attrs(Bitmapset *reference_attrs,
++											  TupleDesc tupleDesc,
++											  List *forbid_pre_detoast_vars);
+ 
+ const TupleTableSlotOps TTSOpsVirtual;
+ const TupleTableSlotOps TTSOpsHeapTuple;
+@@ -432,6 +435,12 @@ tts_heap_materialize(TupleTableSlot *slot)
+ 	slot->tts_flags |= TTS_FLAG_SHOULDFREE;
+ 
+ 	MemoryContextSwitchTo(oldContext);
++
++	/*
++	 * tts_values is treated invalidated since tts_nvalid will is set to 0,
++	 * so let's free the pre-detoast datum.
++	 */
++	ExecFreePreDetoastDatum(slot);
+ }
+ 
+ static void
+@@ -489,6 +498,9 @@ tts_heap_store_tuple(TupleTableSlot *slot, HeapTuple tuple, bool shouldFree)
+ 
+ 	tts_heap_clear(slot);
+ 
++	/* slot_nvalid = 0 */
++	ExecFreePreDetoastDatum(slot);
++
+ 	slot->tts_nvalid = 0;
+ 	hslot->tuple = tuple;
+ 	hslot->off = 0;
+@@ -596,6 +608,7 @@ tts_minimal_materialize(TupleTableSlot *slot)
+ 
+ 	oldContext = MemoryContextSwitchTo(slot->tts_mcxt);
+ 
++
+ 	/*
+ 	 * Have to deform from scratch, otherwise tts_values[] entries could point
+ 	 * into the non-materialized tuple (which might be gone when accessed).
+@@ -628,6 +641,9 @@ tts_minimal_materialize(TupleTableSlot *slot)
+ 	mslot->minhdr.t_data = (HeapTupleHeader) ((char *) mslot->mintuple - MINIMAL_TUPLE_OFFSET);
+ 
+ 	MemoryContextSwitchTo(oldContext);
++
++	/* slot_nvalid = 0 */
++	ExecFreePreDetoastDatum(slot);
+ }
+ 
+ static void
+@@ -687,6 +703,9 @@ tts_minimal_store_tuple(TupleTableSlot *slot, MinimalTuple mtup, bool shouldFree
+ 	Assert(TTS_EMPTY(slot));
+ 
+ 	slot->tts_flags &= ~TTS_FLAG_EMPTY;
++
++	/* tts_nvalid = 0 */
++	ExecFreePreDetoastDatum(slot);
+ 	slot->tts_nvalid = 0;
+ 	mslot->off = 0;
+ 
+@@ -817,6 +836,10 @@ tts_buffer_heap_materialize(TupleTableSlot *slot)
+ 	 * into the non-materialized tuple (which might be gone when accessed).
+ 	 */
+ 	bslot->base.off = 0;
++
++	/* slot_nvalid = 0 */
++	ExecFreePreDetoastDatum(slot);
++
+ 	slot->tts_nvalid = 0;
+ 
+ 	if (!bslot->base.tuple)
+@@ -954,6 +977,10 @@ tts_buffer_heap_store_tuple(TupleTableSlot *slot, HeapTuple tuple,
+ 	}
+ 
+ 	slot->tts_flags &= ~TTS_FLAG_EMPTY;
++
++	/* tts_nvalid = 0 */
++	ExecFreePreDetoastDatum(slot);
++
+ 	slot->tts_nvalid = 0;
+ 	bslot->base.tuple = tuple;
+ 	bslot->base.off = 0;
+@@ -1225,6 +1252,7 @@ MakeTupleTableSlot(TupleDesc tupleDesc,
+ 		slot->tts_flags |= TTS_FLAG_FIXED;
+ 	slot->tts_tupleDescriptor = tupleDesc;
+ 	slot->tts_mcxt = CurrentMemoryContext;
++	slot->tts_data_mctx = NULL;
+ 	slot->tts_nvalid = 0;
+ 
+ 	if (tupleDesc != NULL)
+@@ -1303,6 +1331,8 @@ ExecResetTupleTable(List *tupleTable,	/* tuple table */
+ 				if (slot->tts_isnull)
+ 					pfree(slot->tts_isnull);
+ 			}
++			if (slot->tts_data_mctx != NULL)
++				MemoryContextDelete(slot->tts_data_mctx);
+ 			pfree(slot);
+ 		}
+ 	}
+@@ -1353,6 +1383,9 @@ ExecDropSingleTupleTableSlot(TupleTableSlot *slot)
+ 		if (slot->tts_isnull)
+ 			pfree(slot->tts_isnull);
+ 	}
++	if (slot->tts_data_mctx != NULL)
++		MemoryContextDelete(slot->tts_data_mctx);
++
+ 	pfree(slot);
+ }
+ 
+@@ -1898,12 +1931,26 @@ void
+ ExecInitScanTupleSlot(EState *estate, ScanState *scanstate,
+ 					  TupleDesc tupledesc, const TupleTableSlotOps *tts_ops)
+ {
++	Scan	   *splan = (Scan *) scanstate->ps.plan;
++
+ 	scanstate->ss_ScanTupleSlot = ExecAllocTableSlot(&estate->es_tupleTable,
+ 													 tupledesc, tts_ops);
+ 	scanstate->ps.scandesc = tupledesc;
+ 	scanstate->ps.scanopsfixed = tupledesc != NULL;
+ 	scanstate->ps.scanops = tts_ops;
+ 	scanstate->ps.scanopsset = true;
++
++	if (is_scan_plan((Plan *) splan))
++	{
++		/*
++		 * We may run detoast in Qual or Projection, but all of them happen at
++		 * the ss_ScanTupleSlot rather than ps_ResultTupleSlot. So we can only
++		 * take care of the ss_ScanTupleSlot.
++		 */
++		scanstate->scan_pre_detoast_attrs = cal_final_pre_detoast_attrs(splan->reference_attrs,
++																		tupledesc,
++																		splan->plan.forbid_pre_detoast_vars);
++	}
+ }
+ 
+ /* ----------------
+@@ -2424,3 +2471,87 @@ end_tup_output(TupOutputState *tstate)
+ 	ExecDropSingleTupleTableSlot(tstate->slot);
+ 	pfree(tstate);
+ }
++
++/*
++ * cal_final_pre_detoast_attrs
++ *		Calculate the final attributes which pre-detoast be helpful.
++ *
++ * reference_attrs: the attributes which will be detoast at this plan level.
++ * due to the implementation issue, some non-toast attribute may be included
++ * in reference_attrs, which should be filtered out with tupleDesc.
++ *
++ * forbid_pre_detoast_vars: the vars which should not be pre-detoast as the
++ * small_tlist reason.
++ */
++static Bitmapset *
++cal_final_pre_detoast_attrs(Bitmapset *reference_attrs,
++							TupleDesc tupleDesc,
++							List *forbid_pre_detoast_vars)
++{
++	Bitmapset  *final = NULL,
++			   *toast_attrs = NULL,
++			   *forbid_pre_detoast_attrs = NULL;
++
++	int			i;
++	ListCell   *lc;
++
++	if (bms_is_empty(reference_attrs))
++		return NULL;
++
++	/*
++	 * there is no exact data type in create_plan or set_plan_refs stage, so
++	 * reference_attrs may have some attribute which is not toast attrs at
++	 * all, which should be removed.
++	 */
++	i = -1;
++	while ((i = bms_next_member(reference_attrs, i)) >= 0)
++	{
++		Form_pg_attribute attr = TupleDescAttr(tupleDesc, i);
++		if (attr->attlen == -1 && attr->attstorage != TYPSTORAGE_PLAIN)
++			toast_attrs = bms_add_member(toast_attrs, attr->attnum - 1);
++	}
++
++	/* Filter out the non-toastable attributes. */
++	final = bms_intersect(reference_attrs, toast_attrs);
++
++	if (!bms_is_empty(final))
++	{
++		/*
++		 * Due to the fact of detoast-datum will make the tuple bigger which is
++		 * bad for some nodes like Sort/Hash, to avoid performance regression,
++		 * such attribute should be removed as well.
++		 */
++		foreach(lc, forbid_pre_detoast_vars)
++		{
++			Var		   *var = lfirst_node(Var, lc);
++
++			forbid_pre_detoast_attrs = bms_add_member(forbid_pre_detoast_attrs,
++													  var->varattno - 1);
++		}
++	}
++
++	final = bms_del_members(final, forbid_pre_detoast_attrs);
++
++	bms_free(toast_attrs);
++	bms_free(forbid_pre_detoast_attrs);
++
++	return final;
++}
++
++
++void
++SetPredetoastAttrsForJoin(JoinState *j)
++{
++	PlanState  *outerstate = outerPlanState(j);
++	PlanState  *innerstate = innerPlanState(j);
++
++	j->outer_pre_detoast_attrs = cal_final_pre_detoast_attrs(
++															 ((Join *) j->ps.plan)->outer_reference_attrs,
++															 outerstate->ps_ResultTupleDesc,
++															 outerstate->plan->forbid_pre_detoast_vars);
++
++	j->inner_pre_detoast_attrs = cal_final_pre_detoast_attrs(
++															 ((Join *) j->ps.plan)->inner_reference_attrs,
++															 innerstate->ps_ResultTupleDesc,
++															 innerstate->plan->forbid_pre_detoast_vars);
++}
+diff --git a/src/backend/executor/execUtils.c b/src/backend/executor/execUtils.c
+index 5737f9f4eb..14be69bfec 100644
+--- a/src/backend/executor/execUtils.c
++++ b/src/backend/executor/execUtils.c
+@@ -567,6 +567,8 @@ ExecConditionalAssignProjectionInfo(PlanState *planstate, TupleDesc inputDesc,
+ 		planstate->resultopsset = planstate->scanopsset;
+ 		planstate->resultopsfixed = planstate->scanopsfixed;
+ 		planstate->resultops = planstate->scanops;
++
++		Assert(planstate->ps_ResultTupleDesc != NULL);
+ 	}
+ 	else
+ 	{
+diff --git a/src/backend/executor/nodeHashjoin.c b/src/backend/executor/nodeHashjoin.c
+index dbf114cd5e..dec99cb819 100644
+--- a/src/backend/executor/nodeHashjoin.c
++++ b/src/backend/executor/nodeHashjoin.c
+@@ -755,6 +755,8 @@ ExecInitHashJoin(HashJoin *node, EState *estate, int eflags)
+ 	innerPlanState(hjstate) = ExecInitNode((Plan *) hashNode, estate, eflags);
+ 	innerDesc = ExecGetResultType(innerPlanState(hjstate));
+ 
++	SetPredetoastAttrsForJoin((JoinState *) hjstate);
++
+ 	/*
+ 	 * Initialize result slot, type and projection.
+ 	 */
+diff --git a/src/backend/executor/nodeMergejoin.c b/src/backend/executor/nodeMergejoin.c
+index 4fb34e3537..a4091ffa1a 100644
+--- a/src/backend/executor/nodeMergejoin.c
++++ b/src/backend/executor/nodeMergejoin.c
+@@ -1496,6 +1496,8 @@ ExecInitMergeJoin(MergeJoin *node, EState *estate, int eflags)
+ 											  (eflags | EXEC_FLAG_MARK));
+ 	innerDesc = ExecGetResultType(innerPlanState(mergestate));
+ 
++	SetPredetoastAttrsForJoin((JoinState *) mergestate);
++
+ 	/*
+ 	 * For certain types of inner child nodes, it is advantageous to issue
+ 	 * MARK every time we advance past an inner tuple we will never return to.
+diff --git a/src/backend/executor/nodeNestloop.c b/src/backend/executor/nodeNestloop.c
+index 7f4bf6c4db..d1dfaaab6b 100644
+--- a/src/backend/executor/nodeNestloop.c
++++ b/src/backend/executor/nodeNestloop.c
+@@ -305,6 +305,7 @@ ExecInitNestLoop(NestLoop *node, EState *estate, int eflags)
+ 	 */
+ 	ExecInitResultTupleSlotTL(&nlstate->js.ps, &TTSOpsVirtual);
+ 	ExecAssignProjectionInfo(&nlstate->js.ps, NULL);
++	SetPredetoastAttrsForJoin((JoinState *) nlstate);
+ 
+ 	/*
+ 	 * initialize child expressions
+diff --git a/src/backend/executor/shared_detoast_datum.org b/src/backend/executor/shared_detoast_datum.org
+new file mode 100644
+index 0000000000..2836349b63
+--- /dev/null
++++ b/src/backend/executor/shared_detoast_datum.org
+@@ -0,0 +1,264 @@
++The problem:
++-------------
++
++In the current expression engine, a toasted datum is detoasted when
++required, but the result is discarded immediately, either by pfree it
++immediately or leave it for ResetExprContext. Arguments for which one to
++use exists sometimes. More serious problem is detoasting is expensive,
++especially for the data types like jsonb or array, which the value might
++be very huge. In the blow example, the detoasting happens twice.
++
++SELECT jb_col->'a', jb_col->'b' FROM t;
++
++Within the shared-detoast-datum, we just need to detoast once for each
++tuple, and discard it immediately when the tuple is not needed any
++more. FWIW this issue may existing for small numeric, text as well
++because of SHORT_TOAST feature where the toast's len using 1 byte rather
++than 4 bytes.
++
++Current Design
++--------------
++
++The high level design is let createplan.c and setref.c decide which
++Vars can use this feature, and then the executor save the detoast
++datum back slot->to tts_values[*] during the ExprEvalStep of
++EEOP_{INNER|OUTER|SCAN}_VAR_TOAST. The reasons includes:
++
++- The existing expression engine read datum from tts_values[*], no any
++  extra work need to be done.
++- Reuse the lifespan of TupleTableSlot system to manage memory. It
++  is natural to think the detoast datum is a tts_value just that it is
++  in a detoast format. Since we have a clear lifespan for TupleTableSlot
++  already, like ExecClearTuple, ExecCopySlot et. We are easy to reuse
++  them for managing the datoast datum's memory.
++- The existing projection method can copy the datoasted datum (int64)
++  automatically to the next node's slot, but keeping the ownership
++  unchanged, so only the slot where the detoast really happen take the
++  charge of it's lifespan.
++
++Assuming which Var should use this feature has been decided in
++createplan.c and setref.c already. The following strategy is used to
++reduce the run time overhead.
++
++1. Putting the detoast datum into tts->tts_values[*]. then the ExprEval
++   system doesn't need any extra effort to find them.
++
++static inline void
++ExecSlotDetoastDatum(TupleTableSlot *slot, int attnum)
++{
++    if (!slot->tts_isnull[attnum] &&
++        VARATT_IS_EXTENDED(slot->tts_values[attnum]))
++    {
++        if (unlikely(slot->tts_data_mctx == NULL))
++            slot->tts_data_mctx = GenerationContextCreate(slot->tts_mcxt,
++                                     "tts_value_ctx",
++                                    ALLOCSET_START_SMALL_SIZES);
++        slot->tts_values[attnum] = PointerGetDatum(detoast_attr_ext((struct varlena *) slot->tts_values[attnum],
++                                                                 /* save the detoast value to the given MemoryContext. */
++                                        slot->tts_data_mctx));
++    }
++}
++
++2. Using a dedicated lazy created memory context under TupleTableSlot so
++   that the memory can be released effectively.
++
++static inline void
++ExecFreePreDetoastDatum(TupleTableSlot *slot)
++{
++    if (slot->tts_data_mctx)
++        MemoryContextResetOnly(slot->tts_data_mctx);
++}
++
++3. Control the memory usage by releasing them whenever the
++   slot->tts_values[*] is deemed as invalidate, so the lifespan is
++   likely short.
++
++4. Reduce the run-time overhead for checking if a VAR should use
++   pre-detoast feature, 3 new steps are introduced.
++   EEOP_{INNER,OUTER,SCAN}_VAR_TOAST, so that other Var is totally non
++   related.
++
++Now comes to the createplan.c/setref.c part, which decides which Vars
++should use the shared detoast feature. The guideline of this is:
++
++1. It needs a detoast for a given expression in the previous logic.
++2. It should not breaks the CP_SMALL_TLIST design. Since we saved the
++   detoast datum back to tts_values[*], which make tuple bigger. if we
++   do this blindly, it would be harmful to the ORDER / HASH style nodes.
++
++A high level data flow is:
++
++1. at the createplan.c, we walk the plan tree go gather the
++   CP_SMALL_TLIST because of SORT/HASH style nodes, information and save
++   it to Plan.forbid_pre_detoast_vars via the function
++   set_plan_forbid_pre_detoast_vars_recurse.
++
++2. at the setrefs.c, fix_{scan|join}_expr will recurse to Var for each
++   expression, so it is a good time to track the attribute number and
++   see if the Var is directly or indirectly accessed. Usually the
++   indirectly access a Var means a detoast would happens, for
++   example an expression like a > 3. However some known expressions is
++   ignored. for example: NullTest, pg_column_compression which needs the
++   raw datum, start_with/sub_string which needs a slice
++   detoasting. Currently there is some hard code here, we may needs a
++   pg_proc.detoasting_requirement flags to make this generic.  The
++   output is {Scan|Join}.xxx_reference_attrs;
++
++Note that here I used '_reference_' rather than '_detoast_' is because
++at this part, I still don't know if it is a toastable attrbiute, which
++is known at the MakeTupleTableSlot stage.
++
++3. At the InitPlan Stage, we calculate the final xxx_pre_detoast_attrs
++   in ScanState & JoinState, which will be passed into expression
++   engine in the ExecInitExprRec stage and EEOP_{INNER|OUTER|SCAN}
++   _VAR_TOAST steps are generated finally then everything is connected
++   with ExecSlotDetoastDatum!
++
++
++Testing
++-------
++
++Case 1: small numeric testing.
++===============================
++
++create table t (a numeric);
++insert into t select i from generate_series(1, 100000)i;
++
++cat 1.sql
++
++select * from t where a > 0;
++
++In this test, the current master run detoast twice for each datum. one
++in numeric_gt,  one in numeric_out.  this feature makes the detoast once.
++
++pgbench -f 1.sql -n postgres -T 10 -M prepared
++
++master: 30.218 ms
++patched: 26.957 ms
++
++
++Case 2: Big jsonbs test:
++=============================
++
++create table b(blog jsonb);
++
++INSERT INTO b
++SELECT jsonb_build_object(
++        'title', 'title ' || s.i::text,
++        'content', substring(repeat(md5(random()::text), 100), 1, 3000),
++        'subscriber', (random() * 100)::int,
++        'reader', (random() * 100)::int
++    )
++FROM generate_series(1, 10000) s(i);
++
++
++explain analyze
++select blog from b
++where cast(blog->'reader' as numeric) > 10 and
++cast(blog->'subscriber' as numeric) > 0;
++
++Dump and restore the above data into the current master:
++
++master: 24.588 ms
++patched: 17.664 ms
++
++Memory usage test:
++
++I run the workload of tpch scale 10 on against both master and patched
++versions, the memory usage looks stable and the performance doesn't have
++noticeable improvement and regression as well.
++
++A alternative design: toast cache
++---------------------------------
++
++This method is provided by Tomas during the review process. IIUC, this
++method would maintain a local HTAB which map a toast datum to a detoast
++datum and the entry is maintained / used in detoast_attr
++function. Within this method, the overall design is pretty clear and the
++code modification can be controlled in toasting system only.
++
++Comparison of advantages and disadvantages of the two schemes
++-------------------------------------------------------------
++
++advantage of Toast Cache:
++=========================
++
++- The modification can be controlled in the toasting system only.
++
++disadvantages of Toast Cache:
++=============================
++- As a cache system for user data, the cache is easy to be used up,
++  hence the memory usage is a key problem.
++- cache lookup and cache evict produces more overhead.
++
++advantage of current design:
++============================
++- the runtime overhead is pretty small.
++- the memory usage is easier to control since it is released whenever
++  the slot->tts_values[*] is invalidated.
++
++
++disadvantage of current design:
++================================
++- It modifies createplan.c & setref.c & execExpr.c & execExprInterp.c &
++  execTuples*.c, llvmjit_*.c and so on, I admit it is kinda of invasive,
++  but it is done with some clear reasons.
++
++- It assumes any_foo(toast_col) will detoast the whole datum totally,
++  however some functions like 'starts_with' just need to detoast a slice
++  of datum. we are lacking of a generic way to know this so it is hard
++  coded so far.
++
++
++Bad case testing of current design:
++====================================
++
++- The extra effort of createplan.c & setref.c & execExpr.c & InitPlan :
++
++CREATE TABLE t(a int, b numeric);
++
++q1:
++explain select * from t where a > 3;
++
++q2:
++set enable_hashjoin to off;
++set enable_mergejoin to off;
++set enable_nestloop to on;
++
++explain select * from t join t t2 using(a);
++
++q3:
++set enable_hashjoin to off;
++set enable_mergejoin to on;
++set enable_nestloop to off;
++explain select * from t join t t2 using(a);
++
++
++q4:
++set enable_hashjoin to on;
++set enable_mergejoin to off;
++set enable_nestloop to off;
++explain select * from t join t t2 using(a);
++
++
++pgbench -f x.sql -n postgres  -M simple -T10
++
++| query ID | patched (ms)                        | master (ms)                         | regression(%) |
++|----------+-------------------------------------+-------------------------------------+---------------|
++|        1 | {0.088, 0.088, 0.088, 0.087, 0.089} | {0.111, 0.103, 0.103, 0.099, 0.101} |            3% |
++|        2 |                                     |                                     |               |
++|        3 |                                     |                                     |               |
++|        4 |                                     |                                     |               |
++
++
++- The extra effort of ExecInterpExpr
++
++insert into t select i, i FROM generate_series(1, 100000) i;
++
++SELECT count(b) from t WHERE b > 0;
++
++In this query, the extra execution code is run but it doesn't buy anything.
++
++| master | patched | regression |
++|--------+---------+------------|
++|        |         |            |
+diff --git a/src/backend/jit/llvm/llvmjit_expr.c b/src/backend/jit/llvm/llvmjit_expr.c
+index 9e0efd2668..4ed7ed8c67 100644
+--- a/src/backend/jit/llvm/llvmjit_expr.c
++++ b/src/backend/jit/llvm/llvmjit_expr.c
+@@ -396,30 +396,52 @@ llvm_compile_expr(ExprState *state)
+ 			case EEOP_INNER_VAR:
+ 			case EEOP_OUTER_VAR:
+ 			case EEOP_SCAN_VAR:
++			case EEOP_INNER_VAR_TOAST:
++			case EEOP_OUTER_VAR_TOAST:
++			case EEOP_SCAN_VAR_TOAST:
+ 				{
+ 					LLVMValueRef value,
+ 								isnull;
+ 					LLVMValueRef v_attnum;
+ 					LLVMValueRef v_values;
+ 					LLVMValueRef v_nulls;
++					LLVMValueRef v_slot;
+ 
+-					if (opcode == EEOP_INNER_VAR)
++					if (opcode == EEOP_INNER_VAR || opcode == EEOP_INNER_VAR_TOAST)
+ 					{
++						v_slot = v_innerslot;
+ 						v_values = v_innervalues;
+ 						v_nulls = v_innernulls;
+ 					}
+-					else if (opcode == EEOP_OUTER_VAR)
++					else if (opcode == EEOP_OUTER_VAR || opcode == EEOP_OUTER_VAR_TOAST)
+ 					{
++						v_slot = v_outerslot;
+ 						v_values = v_outervalues;
+ 						v_nulls = v_outernulls;
+ 					}
+ 					else
+ 					{
++						v_slot = v_scanslot;
+ 						v_values = v_scanvalues;
+ 						v_nulls = v_scannulls;
+ 					}
+ 
+ 					v_attnum = l_int32_const(lc, op->d.var.attnum);
++
++					if (opcode == EEOP_INNER_VAR_TOAST ||
++						opcode == EEOP_OUTER_VAR_TOAST ||
++						opcode == EEOP_SCAN_VAR_TOAST)
++					{
++						LLVMValueRef params[2];
++
++						params[0] = v_slot;
++						params[1] = l_int32_const(lc, op->d.var.attnum);
++						l_call(b,
++							   llvm_pg_var_func_type("ExecSlotDetoastDatumExternal"),
++							   llvm_pg_func(mod, "ExecSlotDetoastDatumExternal"),
++							   params, lengthof(params), "");
++					}
++
+ 					value = l_load_gep1(b, TypeSizeT, v_values, v_attnum, "");
+ 					isnull = l_load_gep1(b, TypeStorageBool, v_nulls, v_attnum, "");
+ 					LLVMBuildStore(b, value, v_resvaluep);
+diff --git a/src/backend/jit/llvm/llvmjit_types.c b/src/backend/jit/llvm/llvmjit_types.c
+index f93c383fd5..540fa09dc1 100644
+--- a/src/backend/jit/llvm/llvmjit_types.c
++++ b/src/backend/jit/llvm/llvmjit_types.c
+@@ -182,4 +182,5 @@ void	   *referenced_functions[] =
+ 	strlen,
+ 	varsize_any,
+ 	ExecInterpExprStillValid,
++	ExecSlotDetoastDatumExternal,
+ };
+diff --git a/src/backend/optimizer/plan/createplan.c b/src/backend/optimizer/plan/createplan.c
+index 6b64c4a362..9ffa69225b 100644
+--- a/src/backend/optimizer/plan/createplan.c
++++ b/src/backend/optimizer/plan/createplan.c
+@@ -316,7 +316,9 @@ static ModifyTable *make_modifytable(PlannerInfo *root, Plan *subplan,
+ 									 int epqParam);
+ static GatherMerge *create_gather_merge_plan(PlannerInfo *root,
+ 											 GatherMergePath *best_path);
+-
++static void set_plan_forbid_pre_detoast_vars_recurse(Plan *plan,
++													 List *small_tlist);
++static void set_plan_not_pre_detoast_vars(Plan *plan, List *small_tlist);
+ 
+ /*
+  * create_plan
+@@ -348,6 +350,12 @@ create_plan(PlannerInfo *root, Path *best_path)
+ 	/* Recursively process the path tree, demanding the correct tlist result */
+ 	plan = create_plan_recurse(root, best_path, CP_EXACT_TLIST);
+ 
++	/*
++	 * After the plan tree is built completed, we start to walk for which
++	 * expressions should not used the shared-detoast feature.
++	 */
++	set_plan_forbid_pre_detoast_vars_recurse(plan, NIL);
++
+ 	/*
+ 	 * Make sure the topmost plan node's targetlist exposes the original
+ 	 * column names and other decorative info.  Targetlists generated within
+@@ -380,6 +388,101 @@ create_plan(PlannerInfo *root, Path *best_path)
+ 	return plan;
+ }
+ 
++/*
++ * set_plan_forbid_pre_detoast_vars_recurse
++ *	 Walking the Plan tree in the top-down manner to gather the vars which
++ * should be as small as possible and record them in Plan.forbid_pre_detoast_vars
++ *
++ * plan: the plan node to walk right now.
++ * small_tlist: a list of nodes which its subplan should provide them as
++ * small as possible.
++ */
++static void
++set_plan_forbid_pre_detoast_vars_recurse(Plan *plan, List *small_tlist)
++{
++	if (plan == NULL)
++		return;
++
++	set_plan_not_pre_detoast_vars(plan, small_tlist);
++
++	/* Recurse to its subplan.. */
++	if (IsA(plan, Sort) || IsA(plan, Memoize) || IsA(plan, WindowAgg) ||
++		IsA(plan, Hash) || IsA(plan, Material) || IsA(plan, IncrementalSort))
++	{
++		List	   *sub_small_tlist = get_tlist_exprs(plan->lefttree->targetlist, true);
++
++		/*
++		 * For the sort-like nodes, we want the output of its subplan as small
++		 * as possible, but the subplan's other expressions like Qual doesn't
++		 * have this restriction since they are not output to the upper nodes.
++		 * so we set the small_tlist to the subplan->targetlist.
++		 */
++		set_plan_forbid_pre_detoast_vars_recurse(plan->lefttree, sub_small_tlist);
++	}
++	else if (IsA(plan, HashJoin) && castNode(HashJoin, plan)->left_small_tlist)
++	{
++		List	   *sub_small_tlist = get_tlist_exprs(plan->lefttree->targetlist, true);
++
++		/*
++		 * If the left_small_tlist wants a as small as possible tlist, set it
++		 * in a way like sort for the left node.
++		 */
++		set_plan_forbid_pre_detoast_vars_recurse(plan->lefttree, sub_small_tlist);
++
++		/*
++		 * The righttree is a Hash node, it can be set with its own rule, so
++		 * the small_tlist provided is not important, we just need to recuse
++		 * to its subplan.
++		 */
++		set_plan_forbid_pre_detoast_vars_recurse(plan->righttree, plan->forbid_pre_detoast_vars);
++	}
++	else
++	{
++		/*
++		 * Recurse to its children, just push down the forbid_pre_detoast_vars
++		 * to its children.
++		 */
++		set_plan_forbid_pre_detoast_vars_recurse(plan->lefttree, plan->forbid_pre_detoast_vars);
++		set_plan_forbid_pre_detoast_vars_recurse(plan->righttree, plan->forbid_pre_detoast_vars);
++	}
++}
++
++/*
++ * set_plan_not_pre_detoast_vars
++ *
++ *	Set the Plan.forbid_pre_detoast_vars according the small_tlist information.
++ *
++ * small_tlist = NIL means nothing is forbidden, or else if a Var belongs to the
++ * small_tlist, then it must not be pre-detoasted.
++ */
++static void
++set_plan_not_pre_detoast_vars(Plan *plan, List *small_tlist)
++{
++	ListCell   *lc;
++	Var		   *var;
++
++	/*
++	 * fast path, if we don't have a small_tlist, the var in targetlist is
++	 * impossible member of it. and this case might be a pretty common case.
++	 */
++	if (small_tlist == NIL)
++		return;
++
++	foreach(lc, plan->targetlist)
++	{
++		TargetEntry *te = lfirst_node(TargetEntry, lc);
++
++		if (!IsA(te->expr, Var))
++			continue;
++		var = castNode(Var, te->expr);
++		if (var->varattno <= 0)
++			continue;
++		if (list_member(small_tlist, var))
++			/* pass the recheck */
++			plan->forbid_pre_detoast_vars = lappend(plan->forbid_pre_detoast_vars, var);
++	}
++}
++
+ /*
+  * create_plan_recurse
+  *	  Recursive guts of create_plan().
+@@ -4912,6 +5015,8 @@ create_hashjoin_plan(PlannerInfo *root,
+ 
+ 	copy_generic_path_info(&join_plan->join.plan, &best_path->jpath.path);
+ 
++	join_plan->left_small_tlist = (best_path->num_batches > 1);
++
+ 	return join_plan;
+ }
+ 
+diff --git a/src/backend/optimizer/plan/setrefs.c b/src/backend/optimizer/plan/setrefs.c
+index 37abcb4701..3b609a8796 100644
+--- a/src/backend/optimizer/plan/setrefs.c
++++ b/src/backend/optimizer/plan/setrefs.c
+@@ -27,6 +27,8 @@
+ #include "optimizer/tlist.h"
+ #include "parser/parse_relation.h"
+ #include "tcop/utility.h"
++#include "utils/fmgroids.h"
++#include "utils/lsyscache.h"
+ #include "utils/syscache.h"
+ 
+ 
+@@ -54,11 +56,47 @@ typedef struct
+ 	tlist_vinfo vars[FLEXIBLE_ARRAY_MEMBER];	/* has num_vars entries */
+ } indexed_tlist;
+ 
++/*
++ * Decide which attrs are detoasted in a expressions level, this is judged
++ * at the fix_scan/join_expr stage. The recursed level is tracked when we
++ * walk to a Var, if the level is greater than 1, then it means the
++ * var needs an detoast in this expression list, there are some exceptions
++ * here, see increase_level_for_pre_detoast for details.
++ */
++typedef struct
++{
++	/* if the level is added during a certain walk. */
++	bool		level_added;
++	/* the current level during the walk. */
++	int			level;
++} intermediate_level_context;
++
++/*
++ * Context to hold the detoast attribute within a expression.
++ *
++ * XXX: this design was intent to avoid the pre-detoast-logic if the var
++ * only need to be detoasted *once*, but for now, this context is only
++ * maintained at the expression level rather than plan tree level, so it
++ * can't detect if a Var will be detoasted 2+ time at the plan level.
++ * Recording the times of a Var is detoasted in the plan tree level is
++ * complex.
++ */
++typedef struct
++{
++	/* var is accessed for the first time. */
++	Bitmapset  *existing_attrs; /* not used so far */
++	/* var is accessed for the 2+ times. */
++	Bitmapset **final_ref_attrs;
++} intermediate_var_ref_context;
++
++
+ typedef struct
+ {
+ 	PlannerInfo *root;
+ 	int			rtoffset;
+ 	double		num_exec;
++	intermediate_level_context level_ctx;
++	intermediate_var_ref_context scan_reference_attrs;
+ } fix_scan_expr_context;
+ 
+ typedef struct
+@@ -70,6 +108,9 @@ typedef struct
+ 	int			rtoffset;
+ 	NullingRelsMatch nrm_match;
+ 	double		num_exec;
++	intermediate_level_context level_ctx;
++	intermediate_var_ref_context outer_reference_attrs;
++	intermediate_var_ref_context inner_reference_attrs;
+ } fix_join_expr_context;
+ 
+ typedef struct
+@@ -126,8 +167,8 @@ typedef struct
+ 	(((con)->consttype == REGCLASSOID || (con)->consttype == OIDOID) && \
+ 	 !(con)->constisnull)
+ 
+-#define fix_scan_list(root, lst, rtoffset, num_exec) \
+-	((List *) fix_scan_expr(root, (Node *) (lst), rtoffset, num_exec))
++#define fix_scan_list(root, lst, rtoffset, num_exec, pre_detoast_attrs) \
++	((List *) fix_scan_expr(root, (Node *) (lst), rtoffset, num_exec, pre_detoast_attrs))
+ 
+ static void add_rtes_to_flat_rtable(PlannerInfo *root, bool recursing);
+ static void flatten_unplanned_rtes(PlannerGlobal *glob, RangeTblEntry *rte);
+@@ -157,7 +198,8 @@ static Plan *set_mergeappend_references(PlannerInfo *root,
+ static void set_hash_references(PlannerInfo *root, Plan *plan, int rtoffset);
+ static Relids offset_relid_set(Relids relids, int rtoffset);
+ static Node *fix_scan_expr(PlannerInfo *root, Node *node,
+-						   int rtoffset, double num_exec);
++						   int rtoffset, double num_exec,
++						   Bitmapset **scan_reference_attrs);
+ static Node *fix_scan_expr_mutator(Node *node, fix_scan_expr_context *context);
+ static bool fix_scan_expr_walker(Node *node, fix_scan_expr_context *context);
+ static void set_join_references(PlannerInfo *root, Join *join, int rtoffset);
+@@ -189,7 +231,10 @@ static List *fix_join_expr(PlannerInfo *root,
+ 						   Index acceptable_rel,
+ 						   int rtoffset,
+ 						   NullingRelsMatch nrm_match,
+-						   double num_exec);
++						   double num_exec,
++						   Bitmapset **outer_reference_attrs,
++						   Bitmapset **inner_reference_attrs);
++
+ static Node *fix_join_expr_mutator(Node *node,
+ 								   fix_join_expr_context *context);
+ static Node *fix_upper_expr(PlannerInfo *root,
+@@ -210,6 +255,38 @@ static List *set_windowagg_runcondition_references(PlannerInfo *root,
+ 												   List *runcondition,
+ 												   Plan *plan);
+ 
++/*
++ * func_use_slice_detoast
++ *   Check if a func just needs a pg_detoast_datum_slice, if so we should
++ * not pre detoast it. For now, the known function ID is hard-coded. but
++ * it'd be good that pg_proc can have a attribute like 'detoast_requirement'
++ * the value can be either of:
++ * - full
++ * - first_n (0 ~ N, the current slice method).
++ * - any. (for the incoming of partial detoast feature.
++ *
++ * I think adding this attribute to pg_proc has a stronger reason if partial
++ * detoast patch is accepted.
++ */
++static inline bool
++func_use_slice_detoast(Oid funcOid)
++{
++	/* hard code for now, and it is not used in a hot path yet. */
++	const Oid oids[] = {F_STARTS_WITH,
++
++						F_OVERLAY_BYTEA_BYTEA_INT4, F_OVERLAY_BYTEA_BYTEA_INT4_INT4,
++						F_OVERLAY_TEXT_TEXT_INT4, F_OVERLAY_TEXT_TEXT_INT4_INT4,
++
++						F_SUBSTRING_BYTEA_INT4, F_SUBSTRING_BYTEA_INT4_INT4,
++						F_SUBSTRING_TEXT_INT4, F_SUBSTRING_TEXT_INT4_INT4};
++
++	for (int i = 0; i < sizeof(oids) /sizeof(Oid); i++)
++	{
++		if (funcOid == oids[i])
++			return true;
++	}
++	return false;
++}
+ 
+ /*****************************************************************************
+  *
+@@ -627,10 +704,16 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
+ 				splan->scan.scanrelid += rtoffset;
+ 				splan->scan.plan.targetlist =
+ 					fix_scan_list(root, splan->scan.plan.targetlist,
+-								  rtoffset, NUM_EXEC_TLIST(plan));
++								  rtoffset, NUM_EXEC_TLIST(plan),
++								  &splan->scan.reference_attrs);
+ 				splan->scan.plan.qual =
+ 					fix_scan_list(root, splan->scan.plan.qual,
+-								  rtoffset, NUM_EXEC_QUAL(plan));
++								  rtoffset, NUM_EXEC_QUAL(plan),
++								  &splan->scan.reference_attrs);
++
++				splan->scan.plan.forbid_pre_detoast_vars =
++					fix_scan_list(root, splan->scan.plan.forbid_pre_detoast_vars,
++								  rtoffset, NUM_EXEC_TLIST(plan), NULL);
+ 			}
+ 			break;
+ 		case T_SampleScan:
+@@ -640,13 +723,20 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
+ 				splan->scan.scanrelid += rtoffset;
+ 				splan->scan.plan.targetlist =
+ 					fix_scan_list(root, splan->scan.plan.targetlist,
+-								  rtoffset, NUM_EXEC_TLIST(plan));
++								  rtoffset, NUM_EXEC_TLIST(plan),
++								  &splan->scan.reference_attrs
++					);
+ 				splan->scan.plan.qual =
+ 					fix_scan_list(root, splan->scan.plan.qual,
+-								  rtoffset, NUM_EXEC_QUAL(plan));
++								  rtoffset, NUM_EXEC_QUAL(plan),
++								  &splan->scan.reference_attrs);
+ 				splan->tablesample = (TableSampleClause *)
+ 					fix_scan_expr(root, (Node *) splan->tablesample,
+-								  rtoffset, 1);
++								  rtoffset, 1,
++								  &splan->scan.reference_attrs);
++				splan->scan.plan.forbid_pre_detoast_vars =
++					fix_scan_list(root, splan->scan.plan.forbid_pre_detoast_vars,
++								  rtoffset, NUM_EXEC_TLIST(plan), NULL);
+ 			}
+ 			break;
+ 		case T_IndexScan:
+@@ -656,28 +746,40 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
+ 				splan->scan.scanrelid += rtoffset;
+ 				splan->scan.plan.targetlist =
+ 					fix_scan_list(root, splan->scan.plan.targetlist,
+-								  rtoffset, NUM_EXEC_TLIST(plan));
++								  rtoffset, NUM_EXEC_TLIST(plan),
++								  &splan->scan.reference_attrs);
++
+ 				splan->scan.plan.qual =
+ 					fix_scan_list(root, splan->scan.plan.qual,
+-								  rtoffset, NUM_EXEC_QUAL(plan));
++								  rtoffset, NUM_EXEC_QUAL(plan),
++								  &splan->scan.reference_attrs);
++
+ 				splan->indexqual =
+ 					fix_scan_list(root, splan->indexqual,
+-								  rtoffset, 1);
++								  rtoffset, 1, &splan->scan.reference_attrs);
+ 				splan->indexqualorig =
+ 					fix_scan_list(root, splan->indexqualorig,
+-								  rtoffset, NUM_EXEC_QUAL(plan));
++								  rtoffset, NUM_EXEC_QUAL(plan),
++								  &splan->scan.reference_attrs);
+ 				splan->indexorderby =
+ 					fix_scan_list(root, splan->indexorderby,
+-								  rtoffset, 1);
++								  rtoffset, 1, &splan->scan.reference_attrs);
+ 				splan->indexorderbyorig =
+ 					fix_scan_list(root, splan->indexorderbyorig,
+-								  rtoffset, NUM_EXEC_QUAL(plan));
++								  rtoffset, NUM_EXEC_QUAL(plan), &splan->scan.reference_attrs);
++				splan->scan.plan.forbid_pre_detoast_vars =
++					fix_scan_list(root, splan->scan.plan.forbid_pre_detoast_vars,
++								  rtoffset, NUM_EXEC_TLIST(plan), NULL);
+ 			}
+ 			break;
+ 		case T_IndexOnlyScan:
+ 			{
+ 				IndexOnlyScan *splan = (IndexOnlyScan *) plan;
+ 
++				splan->scan.plan.forbid_pre_detoast_vars =
++					fix_scan_list(root, splan->scan.plan.forbid_pre_detoast_vars,
++								  rtoffset, NUM_EXEC_TLIST(plan), NULL);
++
+ 				return set_indexonlyscan_references(root, splan, rtoffset);
+ 			}
+ 			break;
+@@ -690,10 +792,15 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
+ 				Assert(splan->scan.plan.targetlist == NIL);
+ 				Assert(splan->scan.plan.qual == NIL);
+ 				splan->indexqual =
+-					fix_scan_list(root, splan->indexqual, rtoffset, 1);
++					fix_scan_list(root, splan->indexqual, rtoffset, 1,
++								  &splan->scan.reference_attrs);
+ 				splan->indexqualorig =
+ 					fix_scan_list(root, splan->indexqualorig,
+-								  rtoffset, NUM_EXEC_QUAL(plan));
++								  rtoffset, NUM_EXEC_QUAL(plan),
++								  &splan->scan.reference_attrs);
++				splan->scan.plan.forbid_pre_detoast_vars =
++					fix_scan_list(root, splan->scan.plan.forbid_pre_detoast_vars,
++								  rtoffset, NUM_EXEC_TLIST(plan), NULL);
+ 			}
+ 			break;
+ 		case T_BitmapHeapScan:
+@@ -703,13 +810,20 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
+ 				splan->scan.scanrelid += rtoffset;
+ 				splan->scan.plan.targetlist =
+ 					fix_scan_list(root, splan->scan.plan.targetlist,
+-								  rtoffset, NUM_EXEC_TLIST(plan));
++								  rtoffset, NUM_EXEC_TLIST(plan),
++								  &splan->scan.reference_attrs);
+ 				splan->scan.plan.qual =
+ 					fix_scan_list(root, splan->scan.plan.qual,
+-								  rtoffset, NUM_EXEC_QUAL(plan));
++								  rtoffset, NUM_EXEC_QUAL(plan),
++								  &splan->scan.reference_attrs);
+ 				splan->bitmapqualorig =
+ 					fix_scan_list(root, splan->bitmapqualorig,
+-								  rtoffset, NUM_EXEC_QUAL(plan));
++								  rtoffset, NUM_EXEC_QUAL(plan),
++								  &splan->scan.reference_attrs);
++				splan->scan.plan.forbid_pre_detoast_vars =
++					fix_scan_list(root, splan->scan.plan.forbid_pre_detoast_vars,
++								  rtoffset, NUM_EXEC_TLIST(plan),
++								  NULL);
+ 			}
+ 			break;
+ 		case T_TidScan:
+@@ -719,13 +833,20 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
+ 				splan->scan.scanrelid += rtoffset;
+ 				splan->scan.plan.targetlist =
+ 					fix_scan_list(root, splan->scan.plan.targetlist,
+-								  rtoffset, NUM_EXEC_TLIST(plan));
++								  rtoffset, NUM_EXEC_TLIST(plan),
++								  &splan->scan.reference_attrs);
+ 				splan->scan.plan.qual =
+ 					fix_scan_list(root, splan->scan.plan.qual,
+-								  rtoffset, NUM_EXEC_QUAL(plan));
++								  rtoffset, NUM_EXEC_QUAL(plan),
++								  &splan->scan.reference_attrs);
+ 				splan->tidquals =
+ 					fix_scan_list(root, splan->tidquals,
+-								  rtoffset, 1);
++								  rtoffset, 1,
++								  &splan->scan.reference_attrs);
++				splan->scan.plan.forbid_pre_detoast_vars =
++					fix_scan_list(root, splan->scan.plan.forbid_pre_detoast_vars,
++								  rtoffset, NUM_EXEC_TLIST(plan),
++								  NULL);
+ 			}
+ 			break;
+ 		case T_TidRangeScan:
+@@ -735,13 +856,20 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
+ 				splan->scan.scanrelid += rtoffset;
+ 				splan->scan.plan.targetlist =
+ 					fix_scan_list(root, splan->scan.plan.targetlist,
+-								  rtoffset, NUM_EXEC_TLIST(plan));
++								  rtoffset, NUM_EXEC_TLIST(plan),
++								  &splan->scan.reference_attrs);
+ 				splan->scan.plan.qual =
+ 					fix_scan_list(root, splan->scan.plan.qual,
+-								  rtoffset, NUM_EXEC_QUAL(plan));
++								  rtoffset, NUM_EXEC_QUAL(plan),
++								  &splan->scan.reference_attrs);
+ 				splan->tidrangequals =
+ 					fix_scan_list(root, splan->tidrangequals,
+-								  rtoffset, 1);
++								  rtoffset, 1,
++								  &splan->scan.reference_attrs);
++				splan->scan.plan.forbid_pre_detoast_vars =
++					fix_scan_list(root, splan->scan.plan.forbid_pre_detoast_vars,
++								  rtoffset, NUM_EXEC_TLIST(plan),
++								  NULL);
+ 			}
+ 			break;
+ 		case T_SubqueryScan:
+@@ -756,12 +884,16 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
+ 				splan->scan.scanrelid += rtoffset;
+ 				splan->scan.plan.targetlist =
+ 					fix_scan_list(root, splan->scan.plan.targetlist,
+-								  rtoffset, NUM_EXEC_TLIST(plan));
++								  rtoffset, NUM_EXEC_TLIST(plan),
++								  &splan->scan.reference_attrs);
+ 				splan->scan.plan.qual =
+ 					fix_scan_list(root, splan->scan.plan.qual,
+-								  rtoffset, NUM_EXEC_QUAL(plan));
++								  rtoffset, NUM_EXEC_QUAL(plan),
++								  &splan->scan.reference_attrs);
+ 				splan->functions =
+-					fix_scan_list(root, splan->functions, rtoffset, 1);
++					fix_scan_list(root, splan->functions, rtoffset, 1,
++								  &splan->scan.reference_attrs);
++
+ 			}
+ 			break;
+ 		case T_TableFuncScan:
+@@ -771,13 +903,17 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
+ 				splan->scan.scanrelid += rtoffset;
+ 				splan->scan.plan.targetlist =
+ 					fix_scan_list(root, splan->scan.plan.targetlist,
+-								  rtoffset, NUM_EXEC_TLIST(plan));
++								  rtoffset, NUM_EXEC_TLIST(plan),
++								  &splan->scan.reference_attrs);
+ 				splan->scan.plan.qual =
+ 					fix_scan_list(root, splan->scan.plan.qual,
+-								  rtoffset, NUM_EXEC_QUAL(plan));
++								  rtoffset, NUM_EXEC_QUAL(plan),
++								  &splan->scan.reference_attrs);
++
+ 				splan->tablefunc = (TableFunc *)
+ 					fix_scan_expr(root, (Node *) splan->tablefunc,
+-								  rtoffset, 1);
++								  rtoffset, 1,
++								  &splan->scan.reference_attrs);
+ 			}
+ 			break;
+ 		case T_ValuesScan:
+@@ -787,13 +923,16 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
+ 				splan->scan.scanrelid += rtoffset;
+ 				splan->scan.plan.targetlist =
+ 					fix_scan_list(root, splan->scan.plan.targetlist,
+-								  rtoffset, NUM_EXEC_TLIST(plan));
++								  rtoffset, NUM_EXEC_TLIST(plan),
++								  &splan->scan.reference_attrs);
+ 				splan->scan.plan.qual =
+ 					fix_scan_list(root, splan->scan.plan.qual,
+-								  rtoffset, NUM_EXEC_QUAL(plan));
++								  rtoffset, NUM_EXEC_QUAL(plan),
++								  &splan->scan.reference_attrs);
+ 				splan->values_lists =
+ 					fix_scan_list(root, splan->values_lists,
+-								  rtoffset, 1);
++								  rtoffset, 1,
++								  &splan->scan.reference_attrs);
+ 			}
+ 			break;
+ 		case T_CteScan:
+@@ -803,10 +942,16 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
+ 				splan->scan.scanrelid += rtoffset;
+ 				splan->scan.plan.targetlist =
+ 					fix_scan_list(root, splan->scan.plan.targetlist,
+-								  rtoffset, NUM_EXEC_TLIST(plan));
++								  rtoffset, NUM_EXEC_TLIST(plan),
++								  &splan->scan.reference_attrs);
+ 				splan->scan.plan.qual =
+ 					fix_scan_list(root, splan->scan.plan.qual,
+-								  rtoffset, NUM_EXEC_QUAL(plan));
++								  rtoffset, NUM_EXEC_QUAL(plan),
++								  &splan->scan.reference_attrs);
++				splan->scan.plan.forbid_pre_detoast_vars =
++					fix_scan_list(root, splan->scan.plan.forbid_pre_detoast_vars,
++								  rtoffset, NUM_EXEC_TLIST(plan),
++								  NULL);
+ 			}
+ 			break;
+ 		case T_NamedTuplestoreScan:
+@@ -816,10 +961,12 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
+ 				splan->scan.scanrelid += rtoffset;
+ 				splan->scan.plan.targetlist =
+ 					fix_scan_list(root, splan->scan.plan.targetlist,
+-								  rtoffset, NUM_EXEC_TLIST(plan));
++								  rtoffset, NUM_EXEC_TLIST(plan),
++								  &splan->scan.reference_attrs);
+ 				splan->scan.plan.qual =
+ 					fix_scan_list(root, splan->scan.plan.qual,
+-								  rtoffset, NUM_EXEC_QUAL(plan));
++								  rtoffset, NUM_EXEC_QUAL(plan),
++								  &splan->scan.reference_attrs);
+ 			}
+ 			break;
+ 		case T_WorkTableScan:
+@@ -829,10 +976,12 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
+ 				splan->scan.scanrelid += rtoffset;
+ 				splan->scan.plan.targetlist =
+ 					fix_scan_list(root, splan->scan.plan.targetlist,
+-								  rtoffset, NUM_EXEC_TLIST(plan));
++								  rtoffset, NUM_EXEC_TLIST(plan),
++								  &splan->scan.reference_attrs);
+ 				splan->scan.plan.qual =
+ 					fix_scan_list(root, splan->scan.plan.qual,
+-								  rtoffset, NUM_EXEC_QUAL(plan));
++								  rtoffset, NUM_EXEC_QUAL(plan),
++								  &splan->scan.reference_attrs);
+ 			}
+ 			break;
+ 		case T_ForeignScan:
+@@ -872,7 +1021,8 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
+ 
+ 				mplan->param_exprs = fix_scan_list(root, mplan->param_exprs,
+ 												   rtoffset,
+-												   NUM_EXEC_TLIST(plan));
++												   NUM_EXEC_TLIST(plan),
++												   NULL);
+ 				break;
+ 			}
+ 
+@@ -932,9 +1082,9 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
+ 				Assert(splan->plan.qual == NIL);
+ 
+ 				splan->limitOffset =
+-					fix_scan_expr(root, splan->limitOffset, rtoffset, 1);
++					fix_scan_expr(root, splan->limitOffset, rtoffset, 1, NULL);
+ 				splan->limitCount =
+-					fix_scan_expr(root, splan->limitCount, rtoffset, 1);
++					fix_scan_expr(root, splan->limitCount, rtoffset, 1, NULL);
+ 			}
+ 			break;
+ 		case T_Agg:
+@@ -987,17 +1137,17 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
+ 				 * variable refs, so fix_scan_expr works for them.
+ 				 */
+ 				wplan->startOffset =
+-					fix_scan_expr(root, wplan->startOffset, rtoffset, 1);
++					fix_scan_expr(root, wplan->startOffset, rtoffset, 1, NULL);
+ 				wplan->endOffset =
+-					fix_scan_expr(root, wplan->endOffset, rtoffset, 1);
++					fix_scan_expr(root, wplan->endOffset, rtoffset, 1, NULL);
+ 				wplan->runCondition = fix_scan_list(root,
+ 													wplan->runCondition,
+ 													rtoffset,
+-													NUM_EXEC_TLIST(plan));
++													NUM_EXEC_TLIST(plan), NULL);
+ 				wplan->runConditionOrig = fix_scan_list(root,
+ 														wplan->runConditionOrig,
+ 														rtoffset,
+-														NUM_EXEC_TLIST(plan));
++														NUM_EXEC_TLIST(plan), NULL);
+ 			}
+ 			break;
+ 		case T_Result:
+@@ -1037,14 +1187,14 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
+ 
+ 					splan->plan.targetlist =
+ 						fix_scan_list(root, splan->plan.targetlist,
+-									  rtoffset, NUM_EXEC_TLIST(plan));
++									  rtoffset, NUM_EXEC_TLIST(plan), NULL);
+ 					splan->plan.qual =
+ 						fix_scan_list(root, splan->plan.qual,
+-									  rtoffset, NUM_EXEC_QUAL(plan));
++									  rtoffset, NUM_EXEC_QUAL(plan), NULL);
+ 				}
+ 				/* resconstantqual can't contain any subplan variable refs */
+ 				splan->resconstantqual =
+-					fix_scan_expr(root, splan->resconstantqual, rtoffset, 1);
++					fix_scan_expr(root, splan->resconstantqual, rtoffset, 1, NULL);
+ 			}
+ 			break;
+ 		case T_ProjectSet:
+@@ -1060,7 +1210,7 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
+ 
+ 				splan->withCheckOptionLists =
+ 					fix_scan_list(root, splan->withCheckOptionLists,
+-								  rtoffset, 1);
++								  rtoffset, 1, NULL);
+ 
+ 				if (splan->returningLists)
+ 				{
+@@ -1117,18 +1267,20 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
+ 						fix_join_expr(root, splan->onConflictSet,
+ 									  NULL, itlist,
+ 									  linitial_int(splan->resultRelations),
+-									  rtoffset, NRM_EQUAL, NUM_EXEC_QUAL(plan));
++									  rtoffset, NRM_EQUAL, NUM_EXEC_QUAL(plan),
++									  NULL, NULL);
+ 
+ 					splan->onConflictWhere = (Node *)
+ 						fix_join_expr(root, (List *) splan->onConflictWhere,
+ 									  NULL, itlist,
+ 									  linitial_int(splan->resultRelations),
+-									  rtoffset, NRM_EQUAL, NUM_EXEC_QUAL(plan));
++									  rtoffset, NRM_EQUAL, NUM_EXEC_QUAL(plan),
++									  NULL, NULL);
+ 
+ 					pfree(itlist);
+ 
+ 					splan->exclRelTlist =
+-						fix_scan_list(root, splan->exclRelTlist, rtoffset, 1);
++						fix_scan_list(root, splan->exclRelTlist, rtoffset, 1, NULL);
+ 				}
+ 
+ 				/*
+@@ -1185,7 +1337,8 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
+ 															   resultrel,
+ 															   rtoffset,
+ 															   NRM_EQUAL,
+-															   NUM_EXEC_TLIST(plan));
++															   NUM_EXEC_TLIST(plan),
++															   NULL, NULL);
+ 
+ 							/* Fix quals too. */
+ 							action->qual = (Node *) fix_join_expr(root,
+@@ -1194,7 +1347,8 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
+ 																  resultrel,
+ 																  rtoffset,
+ 																  NRM_EQUAL,
+-																  NUM_EXEC_QUAL(plan));
++																  NUM_EXEC_QUAL(plan),
++																  NULL, NULL);
+ 						}
+ 
+ 						/* Fix join condition too. */
+@@ -1205,7 +1359,9 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
+ 										  resultrel,
+ 										  rtoffset,
+ 										  NRM_EQUAL,
+-										  NUM_EXEC_QUAL(plan));
++										  NUM_EXEC_QUAL(plan),
++										  NULL,
++										  NULL);
+ 						newMJC = lappend(newMJC, mergeJoinCondition);
+ 					}
+ 					splan->mergeJoinConditions = newMJC;
+@@ -1371,13 +1527,16 @@ set_indexonlyscan_references(PlannerInfo *root,
+ 					   NUM_EXEC_QUAL((Plan *) plan));
+ 	/* indexqual is already transformed to reference index columns */
+ 	plan->indexqual = fix_scan_list(root, plan->indexqual,
+-									rtoffset, 1);
++									rtoffset, 1,
++									&plan->scan.reference_attrs);
+ 	/* indexorderby is already transformed to reference index columns */
+ 	plan->indexorderby = fix_scan_list(root, plan->indexorderby,
+-									   rtoffset, 1);
++									   rtoffset, 1,
++									   &plan->scan.reference_attrs);
+ 	/* indextlist must NOT be transformed to reference index columns */
+ 	plan->indextlist = fix_scan_list(root, plan->indextlist,
+-									 rtoffset, NUM_EXEC_TLIST((Plan *) plan));
++									 rtoffset, NUM_EXEC_TLIST((Plan *) plan),
++									 &plan->scan.reference_attrs);
+ 
+ 	pfree(index_itlist);
+ 
+@@ -1424,10 +1583,10 @@ set_subqueryscan_references(PlannerInfo *root,
+ 		plan->scan.scanrelid += rtoffset;
+ 		plan->scan.plan.targetlist =
+ 			fix_scan_list(root, plan->scan.plan.targetlist,
+-						  rtoffset, NUM_EXEC_TLIST((Plan *) plan));
++						  rtoffset, NUM_EXEC_TLIST((Plan *) plan), NULL);
+ 		plan->scan.plan.qual =
+ 			fix_scan_list(root, plan->scan.plan.qual,
+-						  rtoffset, NUM_EXEC_QUAL((Plan *) plan));
++						  rtoffset, NUM_EXEC_QUAL((Plan *) plan), NULL);
+ 
+ 		result = (Plan *) plan;
+ 	}
+@@ -1627,7 +1786,7 @@ set_foreignscan_references(PlannerInfo *root,
+ 		/* fdw_scan_tlist itself just needs fix_scan_list() adjustments */
+ 		fscan->fdw_scan_tlist =
+ 			fix_scan_list(root, fscan->fdw_scan_tlist,
+-						  rtoffset, NUM_EXEC_TLIST((Plan *) fscan));
++						  rtoffset, NUM_EXEC_TLIST((Plan *) fscan), NULL);
+ 	}
+ 	else
+ 	{
+@@ -1637,16 +1796,16 @@ set_foreignscan_references(PlannerInfo *root,
+ 		 */
+ 		fscan->scan.plan.targetlist =
+ 			fix_scan_list(root, fscan->scan.plan.targetlist,
+-						  rtoffset, NUM_EXEC_TLIST((Plan *) fscan));
++						  rtoffset, NUM_EXEC_TLIST((Plan *) fscan), NULL);
+ 		fscan->scan.plan.qual =
+ 			fix_scan_list(root, fscan->scan.plan.qual,
+-						  rtoffset, NUM_EXEC_QUAL((Plan *) fscan));
++						  rtoffset, NUM_EXEC_QUAL((Plan *) fscan), NULL);
+ 		fscan->fdw_exprs =
+ 			fix_scan_list(root, fscan->fdw_exprs,
+-						  rtoffset, NUM_EXEC_QUAL((Plan *) fscan));
++						  rtoffset, NUM_EXEC_QUAL((Plan *) fscan), NULL);
+ 		fscan->fdw_recheck_quals =
+ 			fix_scan_list(root, fscan->fdw_recheck_quals,
+-						  rtoffset, NUM_EXEC_QUAL((Plan *) fscan));
++						  rtoffset, NUM_EXEC_QUAL((Plan *) fscan), NULL);
+ 	}
+ 
+ 	fscan->fs_relids = offset_relid_set(fscan->fs_relids, rtoffset);
+@@ -1705,20 +1864,20 @@ set_customscan_references(PlannerInfo *root,
+ 		/* custom_scan_tlist itself just needs fix_scan_list() adjustments */
+ 		cscan->custom_scan_tlist =
+ 			fix_scan_list(root, cscan->custom_scan_tlist,
+-						  rtoffset, NUM_EXEC_TLIST((Plan *) cscan));
++						  rtoffset, NUM_EXEC_TLIST((Plan *) cscan), NULL);
+ 	}
+ 	else
+ 	{
+ 		/* Adjust tlist, qual, custom_exprs in the standard way */
+ 		cscan->scan.plan.targetlist =
+ 			fix_scan_list(root, cscan->scan.plan.targetlist,
+-						  rtoffset, NUM_EXEC_TLIST((Plan *) cscan));
++						  rtoffset, NUM_EXEC_TLIST((Plan *) cscan), NULL);
+ 		cscan->scan.plan.qual =
+ 			fix_scan_list(root, cscan->scan.plan.qual,
+-						  rtoffset, NUM_EXEC_QUAL((Plan *) cscan));
++						  rtoffset, NUM_EXEC_QUAL((Plan *) cscan), NULL);
+ 		cscan->custom_exprs =
+ 			fix_scan_list(root, cscan->custom_exprs,
+-						  rtoffset, NUM_EXEC_QUAL((Plan *) cscan));
++						  rtoffset, NUM_EXEC_QUAL((Plan *) cscan), NULL);
+ 	}
+ 
+ 	/* Adjust child plan-nodes recursively, if needed */
+@@ -2126,6 +2285,82 @@ fix_alternative_subplan(PlannerInfo *root, AlternativeSubPlan *asplan,
+ 	return (Node *) bestplan;
+ }
+ 
++
++static inline void
++setup_intermediate_level_ctx(intermediate_level_context *ctx)
++{
++	ctx->level = 0;
++	ctx->level_added = false;
++}
++
++static inline void
++setup_intermediate_var_ref_ctx(intermediate_var_ref_context *ctx, Bitmapset **final_ref_attrs)
++{
++	ctx->existing_attrs = NULL;
++	ctx->final_ref_attrs = final_ref_attrs;
++}
++
++/*
++ * increase_level_for_pre_detoast
++ *	Check if the given Expr could detoast a Var directly, if yes,
++ * increase the level and return true. otherwise return false;
++ */
++static inline void
++increase_level_for_pre_detoast(Node *node, intermediate_level_context *ctx)
++{
++	/* The following nodes is impossible to detoast a Var directly. */
++	if (IsA(node, List) || IsA(node, TargetEntry) || IsA(node, NullTest))
++	{
++		ctx->level_added = false;
++	}
++	else if (IsA(node, FuncExpr))
++	{
++		Oid funcOid = castNode(FuncExpr, node)->funcid;
++
++		if (funcOid == F_PG_COLUMN_COMPRESSION || func_use_slice_detoast(funcOid))
++			ctx->level_added =  false;
++		else
++		{
++			ctx->level_added = true;
++			ctx->level += 1;
++		}
++	}
++	else
++	{
++		ctx->level_added = true;
++		ctx->level += 1;
++	}
++}
++
++static inline void
++decreased_level_for_pre_detoast(intermediate_level_context *ctx)
++{
++	if (ctx->level_added)
++		ctx->level -= 1;
++
++	ctx->level_added = false;
++}
++
++/*
++ * add_pre_detoast_vars
++ *		add the var's information into pre_detoast_attrs when the check is pass.
++ */
++static inline void
++add_pre_detoast_vars(intermediate_level_context *level_ctx,
++					 intermediate_var_ref_context *ctx,
++					 Var *var)
++{
++	int			attno;
++
++	if (level_ctx->level <= 1 ||
++		ctx->final_ref_attrs == NULL ||
++		var->varattno <= 0)
++		return;
++
++	attno = var->varattno - 1;
++	*ctx->final_ref_attrs = bms_add_member(*ctx->final_ref_attrs, attno);
++}
++
+ /*
+  * fix_scan_expr
+  *		Do set_plan_references processing on a scan-level expression
+@@ -2140,18 +2375,24 @@ fix_alternative_subplan(PlannerInfo *root, AlternativeSubPlan *asplan,
+  * 'node': the expression to be modified
+  * 'rtoffset': how much to increment varnos by
+  * 'num_exec': estimated number of executions of expression
++ * 'scan_reference_attrs': gather which vars are potential to run the detoast
++ * 	on this expr, NULL means the caller doesn't have interests on this.
+  *
+  * The expression tree is either copied-and-modified, or modified in-place
+  * if that seems safe.
+  */
+ static Node *
+-fix_scan_expr(PlannerInfo *root, Node *node, int rtoffset, double num_exec)
++fix_scan_expr(PlannerInfo *root, Node *node, int rtoffset,
++			  double num_exec, Bitmapset **scan_reference_attrs)
+ {
+ 	fix_scan_expr_context context;
+ 
+ 	context.root = root;
+ 	context.rtoffset = rtoffset;
+ 	context.num_exec = num_exec;
++	setup_intermediate_level_ctx(&context.level_ctx);
++	setup_intermediate_var_ref_ctx(&context.scan_reference_attrs,
++								   scan_reference_attrs);
+ 
+ 	if (rtoffset != 0 ||
+ 		root->multiexpr_params != NIL ||
+@@ -2182,8 +2423,13 @@ fix_scan_expr(PlannerInfo *root, Node *node, int rtoffset, double num_exec)
+ static Node *
+ fix_scan_expr_mutator(Node *node, fix_scan_expr_context *context)
+ {
++	Node	   *n;
++
+ 	if (node == NULL)
+ 		return NULL;
++
++	increase_level_for_pre_detoast(node, &context->level_ctx);
++
+ 	if (IsA(node, Var))
+ 	{
+ 		Var		   *var = copyVar((Var *) node);
+@@ -2201,10 +2447,18 @@ fix_scan_expr_mutator(Node *node, fix_scan_expr_context *context)
+ 			var->varno += context->rtoffset;
+ 		if (var->varnosyn > 0)
+ 			var->varnosyn += context->rtoffset;
++
++		add_pre_detoast_vars(&context->level_ctx,
++							 &context->scan_reference_attrs,
++							 var);
++		decreased_level_for_pre_detoast(&context->level_ctx);
+ 		return (Node *) var;
+ 	}
+ 	if (IsA(node, Param))
++	{
++		decreased_level_for_pre_detoast(&context->level_ctx);
+ 		return fix_param_node(context->root, (Param *) node);
++	}
+ 	if (IsA(node, Aggref))
+ 	{
+ 		Aggref	   *aggref = (Aggref *) node;
+@@ -2214,8 +2468,10 @@ fix_scan_expr_mutator(Node *node, fix_scan_expr_context *context)
+ 		aggparam = find_minmax_agg_replacement_param(context->root, aggref);
+ 		if (aggparam != NULL)
+ 		{
++			decreased_level_for_pre_detoast(&context->level_ctx);
+ 			/* Make a copy of the Param for paranoia's sake */
+ 			return (Node *) copyObject(aggparam);
++
+ 		}
+ 		/* If no match, just fall through to process it normally */
+ 	}
+@@ -2225,6 +2481,7 @@ fix_scan_expr_mutator(Node *node, fix_scan_expr_context *context)
+ 
+ 		Assert(!IS_SPECIAL_VARNO(cexpr->cvarno));
+ 		cexpr->cvarno += context->rtoffset;
++		decreased_level_for_pre_detoast(&context->level_ctx);
+ 		return (Node *) cexpr;
+ 	}
+ 	if (IsA(node, PlaceHolderVar))
+@@ -2233,29 +2490,52 @@ fix_scan_expr_mutator(Node *node, fix_scan_expr_context *context)
+ 		PlaceHolderVar *phv = (PlaceHolderVar *) node;
+ 
+ 		/* XXX can we assert something about phnullingrels? */
+-		return fix_scan_expr_mutator((Node *) phv->phexpr, context);
++		Node	   *n2 = fix_scan_expr_mutator((Node *) phv->phexpr, context);
++
++		decreased_level_for_pre_detoast(&context->level_ctx);
++		return n2;
+ 	}
+ 	if (IsA(node, AlternativeSubPlan))
+-		return fix_scan_expr_mutator(fix_alternative_subplan(context->root,
+-															 (AlternativeSubPlan *) node,
+-															 context->num_exec),
+-									 context);
++	{
++		Node	   *n2 = fix_scan_expr_mutator(fix_alternative_subplan(context->root,
++																	   (AlternativeSubPlan *) node,
++																	   context->num_exec),
++											   context);
++
++		decreased_level_for_pre_detoast(&context->level_ctx);
++		return n2;
++	}
+ 	fix_expr_common(context->root, node);
+-	return expression_tree_mutator(node, fix_scan_expr_mutator,
+-								   (void *) context);
++	n = expression_tree_mutator(node, fix_scan_expr_mutator, (void *) context);
++	decreased_level_for_pre_detoast(&context->level_ctx);
++	return n;
+ }
+ 
+ static bool
+ fix_scan_expr_walker(Node *node, fix_scan_expr_context *context)
+ {
++	bool		ret;
++
+ 	if (node == NULL)
+ 		return false;
++
++	increase_level_for_pre_detoast(node, &context->level_ctx);
++
++	if (IsA(node, Var))
++	{
++		add_pre_detoast_vars(&context->level_ctx,
++							 &context->scan_reference_attrs,
++							 castNode(Var, node));
++	}
+ 	Assert(!(IsA(node, Var) && ((Var *) node)->varno == ROWID_VAR));
+ 	Assert(!IsA(node, PlaceHolderVar));
+ 	Assert(!IsA(node, AlternativeSubPlan));
+ 	fix_expr_common(context->root, node);
+-	return expression_tree_walker(node, fix_scan_expr_walker,
+-								  (void *) context);
++	ret = expression_tree_walker(node, fix_scan_expr_walker,
++								 (void *) context);
++
++	decreased_level_for_pre_detoast(&context->level_ctx);
++	return ret;
+ }
+ 
+ /*
+@@ -2291,7 +2571,10 @@ set_join_references(PlannerInfo *root, Join *join, int rtoffset)
+ 								   (Index) 0,
+ 								   rtoffset,
+ 								   NRM_EQUAL,
+-								   NUM_EXEC_QUAL((Plan *) join));
++								   NUM_EXEC_QUAL((Plan *) join),
++								   &join->outer_reference_attrs,
++								   &join->inner_reference_attrs
++		);
+ 
+ 	/* Now do join-type-specific stuff */
+ 	if (IsA(join, NestLoop))
+@@ -2338,7 +2621,9 @@ set_join_references(PlannerInfo *root, Join *join, int rtoffset)
+ 										 (Index) 0,
+ 										 rtoffset,
+ 										 NRM_EQUAL,
+-										 NUM_EXEC_QUAL((Plan *) join));
++										 NUM_EXEC_QUAL((Plan *) join),
++										 &join->outer_reference_attrs,
++										 &join->inner_reference_attrs);
+ 	}
+ 	else if (IsA(join, HashJoin))
+ 	{
+@@ -2351,7 +2636,9 @@ set_join_references(PlannerInfo *root, Join *join, int rtoffset)
+ 										(Index) 0,
+ 										rtoffset,
+ 										NRM_EQUAL,
+-										NUM_EXEC_QUAL((Plan *) join));
++										NUM_EXEC_QUAL((Plan *) join),
++										&join->outer_reference_attrs,
++										&join->inner_reference_attrs);
+ 
+ 		/*
+ 		 * HashJoin's hashkeys are used to look for matching tuples from its
+@@ -2383,7 +2670,9 @@ set_join_references(PlannerInfo *root, Join *join, int rtoffset)
+ 										  (Index) 0,
+ 										  rtoffset,
+ 										  (join->jointype == JOIN_INNER ? NRM_EQUAL : NRM_SUPERSET),
+-										  NUM_EXEC_TLIST((Plan *) join));
++										  NUM_EXEC_TLIST((Plan *) join),
++										  &join->outer_reference_attrs,
++										  &join->inner_reference_attrs);
+ 	join->plan.qual = fix_join_expr(root,
+ 									join->plan.qual,
+ 									outer_itlist,
+@@ -2391,8 +2680,20 @@ set_join_references(PlannerInfo *root, Join *join, int rtoffset)
+ 									(Index) 0,
+ 									rtoffset,
+ 									(join->jointype == JOIN_INNER ? NRM_EQUAL : NRM_SUPERSET),
+-									NUM_EXEC_QUAL((Plan *) join));
+-
++									NUM_EXEC_QUAL((Plan *) join),
++									&join->outer_reference_attrs,
++									&join->inner_reference_attrs);
++
++	join->plan.forbid_pre_detoast_vars = fix_join_expr(root,
++													   join->plan.forbid_pre_detoast_vars,
++													   outer_itlist,
++													   inner_itlist,
++													   (Index) 0,
++													   rtoffset,
++													   (join->jointype == JOIN_INNER ? NRM_EQUAL : NRM_SUPERSET),
++													   NUM_EXEC_TLIST((Plan *) join),
++													   NULL,
++													   NULL);
+ 	pfree(outer_itlist);
+ 	pfree(inner_itlist);
+ }
+@@ -3025,9 +3326,12 @@ fix_join_expr(PlannerInfo *root,
+ 			  Index acceptable_rel,
+ 			  int rtoffset,
+ 			  NullingRelsMatch nrm_match,
+-			  double num_exec)
++			  double num_exec,
++			  Bitmapset **outer_reference_attrs,
++			  Bitmapset **inner_reference_attrs)
+ {
+ 	fix_join_expr_context context;
++	List	   *ret;
+ 
+ 	context.root = root;
+ 	context.outer_itlist = outer_itlist;
+@@ -3036,16 +3340,30 @@ fix_join_expr(PlannerInfo *root,
+ 	context.rtoffset = rtoffset;
+ 	context.nrm_match = nrm_match;
+ 	context.num_exec = num_exec;
+-	return (List *) fix_join_expr_mutator((Node *) clauses, &context);
++
++	setup_intermediate_level_ctx(&context.level_ctx);
++	setup_intermediate_var_ref_ctx(&context.outer_reference_attrs, outer_reference_attrs);
++	setup_intermediate_var_ref_ctx(&context.inner_reference_attrs, inner_reference_attrs);
++
++	ret = (List *) fix_join_expr_mutator((Node *) clauses, &context);
++
++	bms_free(context.outer_reference_attrs.existing_attrs);
++	bms_free(context.inner_reference_attrs.existing_attrs);
++
++	return ret;
+ }
+ 
+ static Node *
+ fix_join_expr_mutator(Node *node, fix_join_expr_context *context)
+ {
+ 	Var		   *newvar;
++	Node	   *ret_node;
+ 
+ 	if (node == NULL)
+ 		return NULL;
++
++	increase_level_for_pre_detoast(node, &context->level_ctx);
++
+ 	if (IsA(node, Var))
+ 	{
+ 		Var		   *var = (Var *) node;
+@@ -3059,7 +3377,13 @@ fix_join_expr_mutator(Node *node, fix_join_expr_context *context)
+ 												  context->rtoffset,
+ 												  context->nrm_match);
+ 			if (newvar)
++			{
++				add_pre_detoast_vars(&context->level_ctx,
++									 &context->outer_reference_attrs,
++									 newvar);
++				decreased_level_for_pre_detoast(&context->level_ctx);
+ 				return (Node *) newvar;
++			}
+ 		}
+ 
+ 		/* then in the inner. */
+@@ -3071,7 +3395,13 @@ fix_join_expr_mutator(Node *node, fix_join_expr_context *context)
+ 												  context->rtoffset,
+ 												  context->nrm_match);
+ 			if (newvar)
++			{
++				add_pre_detoast_vars(&context->level_ctx,
++									 &context->inner_reference_attrs,
++									 newvar);
++				decreased_level_for_pre_detoast(&context->level_ctx);
+ 				return (Node *) newvar;
++			}
+ 		}
+ 
+ 		/* If it's for acceptable_rel, adjust and return it */
+@@ -3081,6 +3411,9 @@ fix_join_expr_mutator(Node *node, fix_join_expr_context *context)
+ 			var->varno += context->rtoffset;
+ 			if (var->varnosyn > 0)
+ 				var->varnosyn += context->rtoffset;
++			/* XXX acceptable_rel?  we can ignore it for safety. */
++			decreased_level_for_pre_detoast(&context->level_ctx);
++
+ 			return (Node *) var;
+ 		}
+ 
+@@ -3099,22 +3432,38 @@ fix_join_expr_mutator(Node *node, fix_join_expr_context *context)
+ 												  OUTER_VAR,
+ 												  context->nrm_match);
+ 			if (newvar)
++			{
++				add_pre_detoast_vars(&context->level_ctx,
++									 &context->outer_reference_attrs,
++									 newvar);
++				decreased_level_for_pre_detoast(&context->level_ctx);
+ 				return (Node *) newvar;
++			}
+ 		}
+ 		if (context->inner_itlist && context->inner_itlist->has_ph_vars)
+ 		{
++
+ 			newvar = search_indexed_tlist_for_phv(phv,
+ 												  context->inner_itlist,
+ 												  INNER_VAR,
+ 												  context->nrm_match);
+ 			if (newvar)
++			{
++				add_pre_detoast_vars(&context->level_ctx,
++									 &context->inner_reference_attrs,
++									 newvar);
++				decreased_level_for_pre_detoast(&context->level_ctx);
+ 				return (Node *) newvar;
++			}
+ 		}
+ 
+ 		/* If not supplied by input plans, evaluate the contained expr */
+ 		/* XXX can we assert something about phnullingrels? */
+-		return fix_join_expr_mutator((Node *) phv->phexpr, context);
++		ret_node = fix_join_expr_mutator((Node *) phv->phexpr, context);
++		decreased_level_for_pre_detoast(&context->level_ctx);
++		return ret_node;
+ 	}
++
+ 	/* Try matching more complex expressions too, if tlists have any */
+ 	if (context->outer_itlist && context->outer_itlist->has_non_vars)
+ 	{
+@@ -3122,7 +3471,13 @@ fix_join_expr_mutator(Node *node, fix_join_expr_context *context)
+ 												  context->outer_itlist,
+ 												  OUTER_VAR);
+ 		if (newvar)
++		{
++			add_pre_detoast_vars(&context->level_ctx,
++								 &context->outer_reference_attrs,
++								 newvar);
++			decreased_level_for_pre_detoast(&context->level_ctx);
+ 			return (Node *) newvar;
++		}
+ 	}
+ 	if (context->inner_itlist && context->inner_itlist->has_non_vars)
+ 	{
+@@ -3130,20 +3485,36 @@ fix_join_expr_mutator(Node *node, fix_join_expr_context *context)
+ 												  context->inner_itlist,
+ 												  INNER_VAR);
+ 		if (newvar)
++		{
++			add_pre_detoast_vars(&context->level_ctx,
++								 &context->inner_reference_attrs,
++								 newvar);
++			decreased_level_for_pre_detoast(&context->level_ctx);
+ 			return (Node *) newvar;
++		}
+ 	}
+ 	/* Special cases (apply only AFTER failing to match to lower tlist) */
+ 	if (IsA(node, Param))
+-		return fix_param_node(context->root, (Param *) node);
++	{
++		ret_node = fix_param_node(context->root, (Param *) node);
++		decreased_level_for_pre_detoast(&context->level_ctx);
++		return ret_node;
++	}
+ 	if (IsA(node, AlternativeSubPlan))
+-		return fix_join_expr_mutator(fix_alternative_subplan(context->root,
+-															 (AlternativeSubPlan *) node,
+-															 context->num_exec),
+-									 context);
++	{
++		ret_node = fix_join_expr_mutator(fix_alternative_subplan(context->root,
++																 (AlternativeSubPlan *) node,
++																 context->num_exec),
++										 context);
++		decreased_level_for_pre_detoast(&context->level_ctx);
++		return ret_node;
++	}
+ 	fix_expr_common(context->root, node);
+-	return expression_tree_mutator(node,
+-								   fix_join_expr_mutator,
+-								   (void *) context);
++	ret_node = expression_tree_mutator(node,
++									   fix_join_expr_mutator,
++									   (void *) context);
++	decreased_level_for_pre_detoast(&context->level_ctx);
++	return ret_node;
+ }
+ 
+ /*
+@@ -3178,7 +3549,8 @@ fix_join_expr_mutator(Node *node, fix_join_expr_context *context)
+  * varno = newvarno, varattno = resno of corresponding targetlist element.
+  * The original tree is not modified.
+  */
+-static Node *
++static Node *					/* XXX: shall I care about this for shared
++								 * detoast optimization? */
+ fix_upper_expr(PlannerInfo *root,
+ 			   Node *node,
+ 			   indexed_tlist *subplan_itlist,
+@@ -3333,7 +3705,10 @@ set_returning_clause_references(PlannerInfo *root,
+ 						  resultRelation,
+ 						  rtoffset,
+ 						  NRM_EQUAL,
+-						  NUM_EXEC_TLIST(topplan));
++						  NUM_EXEC_TLIST(topplan),
++						  NULL,
++						  NULL
++		);
+ 
+ 	pfree(itlist);
+ 
+diff --git a/src/include/access/detoast.h b/src/include/access/detoast.h
+index 12d8cdb356..9ddc05604e 100644
+--- a/src/include/access/detoast.h
++++ b/src/include/access/detoast.h
+@@ -42,6 +42,7 @@ do { \
+  * ----------
+  */
+ extern struct varlena *detoast_external_attr(struct varlena *attr);
++extern struct varlena *detoast_external_attr_ext(struct varlena *attr, MemoryContext ctx);
+ 
+ /* ----------
+  * detoast_attr() -
+@@ -51,6 +52,8 @@ extern struct varlena *detoast_external_attr(struct varlena *attr);
+  * ----------
+  */
+ extern struct varlena *detoast_attr(struct varlena *attr);
++extern struct varlena *detoast_attr_ext(struct varlena *attr, MemoryContext ctx);
++
+ 
+ /* ----------
+  * detoast_attr_slice() -
+diff --git a/src/include/access/toast_compression.h b/src/include/access/toast_compression.h
+index 64d5e079fa..00ea153e4e 100644
+--- a/src/include/access/toast_compression.h
++++ b/src/include/access/toast_compression.h
+@@ -55,13 +55,13 @@ typedef enum ToastCompressionId
+ 
+ /* pglz compression/decompression routines */
+ extern struct varlena *pglz_compress_datum(const struct varlena *value);
+-extern struct varlena *pglz_decompress_datum(const struct varlena *value);
++extern struct varlena *pglz_decompress_datum(const struct varlena *value, MemoryContext ctx);
+ extern struct varlena *pglz_decompress_datum_slice(const struct varlena *value,
+ 												   int32 slicelength);
+ 
+ /* lz4 compression/decompression routines */
+ extern struct varlena *lz4_compress_datum(const struct varlena *value);
+-extern struct varlena *lz4_decompress_datum(const struct varlena *value);
++extern struct varlena *lz4_decompress_datum(const struct varlena *value, MemoryContext ctx);
+ extern struct varlena *lz4_decompress_datum_slice(const struct varlena *value,
+ 												  int32 slicelength);
+ 
+diff --git a/src/include/executor/execExpr.h b/src/include/executor/execExpr.h
+index 64698202a5..9f070d784e 100644
+--- a/src/include/executor/execExpr.h
++++ b/src/include/executor/execExpr.h
+@@ -78,6 +78,17 @@ typedef enum ExprEvalOp
+ 	EEOP_OUTER_VAR,
+ 	EEOP_SCAN_VAR,
+ 
++	/*
++	 * compute non-system Var value with shared-detoast-datum logic, use some
++	 * dedicated steps rather than add extra logic to existing steps is for
++	 * performance aspect, within this way, we just decide if the extra logic
++	 * is needed at ExecInitExpr stage once rather than every time of
++	 * ExecInterpExpr.
++	 */
++	EEOP_INNER_VAR_TOAST,
++	EEOP_OUTER_VAR_TOAST,
++	EEOP_SCAN_VAR_TOAST,
++
+ 	/* compute system Var value */
+ 	EEOP_INNER_SYSVAR,
+ 	EEOP_OUTER_SYSVAR,
+@@ -855,5 +866,6 @@ extern void ExecEvalAggOrderedTransDatum(ExprState *state, ExprEvalStep *op,
+ 										 ExprContext *econtext);
+ extern void ExecEvalAggOrderedTransTuple(ExprState *state, ExprEvalStep *op,
+ 										 ExprContext *econtext);
++extern void ExecSlotDetoastDatumExternal(TupleTableSlot *slot, int attnum);
+ 
+ #endif							/* EXEC_EXPR_H */
+diff --git a/src/include/executor/tuptable.h b/src/include/executor/tuptable.h
+index b82655e7e5..dd5d28db17 100644
+--- a/src/include/executor/tuptable.h
++++ b/src/include/executor/tuptable.h
+@@ -19,6 +19,7 @@
+ #include "access/sysattr.h"
+ #include "access/tupdesc.h"
+ #include "storage/buf.h"
++#include "utils/memutils.h"
+ 
+ /*----------
+  * The executor stores tuples in a "tuple table" which is a List of
+@@ -126,6 +127,7 @@ typedef struct TupleTableSlot
+ #define FIELDNO_TUPLETABLESLOT_ISNULL 6
+ 	bool	   *tts_isnull;		/* current per-attribute isnull flags */
+ 	MemoryContext tts_mcxt;		/* slot itself is in this context */
++	MemoryContext tts_data_mctx; /* The external content of tts_values[*] */
+ 	ItemPointerData tts_tid;	/* stored tuple's tid */
+ 	Oid			tts_tableOid;	/* table oid of tuple */
+ } TupleTableSlot;
+@@ -447,12 +449,24 @@ slot_is_current_xact_tuple(TupleTableSlot *slot)
+ 	return slot->tts_ops->is_current_xact_tuple(slot);
+ }
+ 
++/*
++ * ExecFreePreDetoastDatum - free the memory which is allocated in tts_data_mcxt.
++ */
++static inline void
++ExecFreePreDetoastDatum(TupleTableSlot *slot)
++{
++	if (slot->tts_data_mctx)
++		MemoryContextResetOnly(slot->tts_data_mctx);
++}
++
+ /*
+  * ExecClearTuple - clear the slot's contents
+  */
+ static inline TupleTableSlot *
+ ExecClearTuple(TupleTableSlot *slot)
+ {
++	ExecFreePreDetoastDatum(slot);
++
+ 	slot->tts_ops->clear(slot);
+ 
+ 	return slot;
+diff --git a/src/include/nodes/execnodes.h b/src/include/nodes/execnodes.h
+index 8bc421e7c0..43654b2acd 100644
+--- a/src/include/nodes/execnodes.h
++++ b/src/include/nodes/execnodes.h
+@@ -1565,6 +1565,12 @@ typedef struct ScanState
+ 	Relation	ss_currentRelation;
+ 	struct TableScanDescData *ss_currentScanDesc;
+ 	TupleTableSlot *ss_ScanTupleSlot;
++
++	/*
++	 * The final attributes which should apply the pre-detoast-attrs logic on
++	 * the Scan nodes.
++	 */
++	Bitmapset  *scan_pre_detoast_attrs;
+ } ScanState;
+ 
+ /* ----------------
+@@ -2088,6 +2094,13 @@ typedef struct JoinState
+ 	bool		single_match;	/* True if we should skip to next outer tuple
+ 								 * after finding one inner match */
+ 	ExprState  *joinqual;		/* JOIN quals (in addition to ps.qual) */
++
++	/*
++	 * The final attributes which should apply the pre-detoast-attrs logic on
++	 * the join nodes.
++	 */
++	Bitmapset  *outer_pre_detoast_attrs;
++	Bitmapset  *inner_pre_detoast_attrs;
+ } JoinState;
+ 
+ /* ----------------
+@@ -2848,4 +2861,5 @@ typedef struct LimitState
+ 	TupleTableSlot *last_slot;	/* slot for evaluation of ties */
+ } LimitState;
+ 
++extern void SetPredetoastAttrsForJoin(JoinState *joinstate);
+ #endif							/* EXECNODES_H */
+diff --git a/src/include/nodes/plannodes.h b/src/include/nodes/plannodes.h
+index e025679f89..a5d6966da7 100644
+--- a/src/include/nodes/plannodes.h
++++ b/src/include/nodes/plannodes.h
+@@ -169,6 +169,13 @@ typedef struct Plan
+ 	 */
+ 	Bitmapset  *extParam;
+ 	Bitmapset  *allParam;
++
++	/*
++	 * A list of Vars which should not apply the shared-detoast-datum logic
++	 * since the upper nodes like Sort/Hash wants them as small as possible.
++	 * It's a subset of targetlist in each Plan node.
++	 */
++	List	   *forbid_pre_detoast_vars;
+ } Plan;
+ 
+ /* ----------------
+@@ -387,6 +394,16 @@ typedef struct Scan
+ 
+ 	Plan		plan;
+ 	Index		scanrelid;		/* relid is index into the range table */
++
++	/*
++	 * Records of var's varattno - 1 where the Var is accessed indirectly by
++	 * any expression, like a > 3.  However a IS [NOT] NULL is not included
++	 * since it doesn't access the tts_values[*] at all.
++	 *
++	 * This is a essential information to figure out which attrs should use
++	 * the pre-detoast-attrs logic.
++	 */
++	Bitmapset  *reference_attrs;
+ } Scan;
+ 
+ /* ----------------
+@@ -791,6 +808,17 @@ typedef struct Join
+ 	JoinType	jointype;
+ 	bool		inner_unique;
+ 	List	   *joinqual;		/* JOIN quals (in addition to plan.qual) */
++
++	/*
++	 * Records of var's varattno - 1 where the Var is accessed indirectly by
++	 * any expression, like a > 3.  However a IS [NOT] NULL is not included
++	 * since it doesn't access the tts_values[*] at all.
++	 *
++	 * This is a essential information to figure out which attrs should use
++	 * the pre-detoast-attrs logic.
++	 */
++	Bitmapset  *outer_reference_attrs;
++	Bitmapset  *inner_reference_attrs;
+ } Join;
+ 
+ /* ----------------
+@@ -871,6 +899,11 @@ typedef struct HashJoin
+ 	 * perform lookups in the hashtable over the inner plan.
+ 	 */
+ 	List	   *hashkeys;
++
++	/*
++	 * Whether the left plan tree should use a SMALL_TLIST.
++	 */
++	bool		left_small_tlist;
+ } HashJoin;
+ 
+ /* ----------------
+@@ -1590,4 +1623,24 @@ typedef enum MonotonicFunction
+ 	MONOTONICFUNC_BOTH = MONOTONICFUNC_INCREASING | MONOTONICFUNC_DECREASING,
+ } MonotonicFunction;
+ 
++static inline bool
++is_join_plan(Plan *plan)
++{
++	return (plan != NULL) && (IsA(plan, NestLoop) || IsA(plan, HashJoin) || IsA(plan, MergeJoin));
++}
++
++static inline bool
++is_scan_plan(Plan *plan)
++{
++	return (plan != NULL) &&
++		(IsA(plan, SeqScan) ||
++		 IsA(plan, SampleScan) ||
++		 IsA(plan, IndexScan) ||
++		 IsA(plan, IndexOnlyScan) ||
++		 IsA(plan, BitmapIndexScan) ||
++		 IsA(plan, BitmapHeapScan) ||
++		 IsA(plan, TidScan) ||
++		 IsA(plan, SubqueryScan));
++}
++
+ #endif							/* PLANNODES_H */
+diff --git a/src/tools/pgindent/typedefs.list b/src/tools/pgindent/typedefs.list
+index 34ec87a85e..8d18fe2472 100644
+--- a/src/tools/pgindent/typedefs.list
++++ b/src/tools/pgindent/typedefs.list
+@@ -4106,6 +4106,8 @@ cb_cleanup_dir
+ cb_options
+ cb_tablespace
+ cb_tablespace_mapping
++intermediate_var_ref_context
++intermediate_level_context
+ manifest_data
+ manifest_writer
+ rfile
+-- 
+2.34.1
+
