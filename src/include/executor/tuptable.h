@@ -152,6 +152,14 @@ typedef struct TupleTableSlot
 } TupleTableSlot;
 
 /* routines for a TupleTableSlot implementation */
+/*
+ * Every implementation must call ExecSlotResetDetoast() whenever it is about
+ * to invalidate the slot's tts_values by other means than clear(), that is
+ * in any function that stores a new tuple, copies another slot in, or
+ * materializes the contents; see the in-tree implementations.  Otherwise a
+ * detoasted copy of the previous tuple's value (tts_detoasted) could be
+ * handed out for the new one.
+ */
 struct TupleTableSlotOps
 {
 	/* Minimum size of the slot */
@@ -518,6 +526,7 @@ ExecClearTuple(TupleTableSlot *slot)
 static inline void
 ExecMaterializeSlot(TupleTableSlot *slot)
 {
+	ExecSlotResetDetoast(slot);
 	slot->tts_ops->materialize(slot);
 }
 
@@ -572,6 +581,7 @@ ExecCopySlot(TupleTableSlot *dstslot, TupleTableSlot *srcslot)
 	Assert(dstslot->tts_tupleDescriptor->natts ==
 		   srcslot->tts_tupleDescriptor->natts);
 
+	ExecSlotResetDetoast(dstslot);
 	dstslot->tts_ops->copyslot(dstslot, srcslot);
 
 	return dstslot;

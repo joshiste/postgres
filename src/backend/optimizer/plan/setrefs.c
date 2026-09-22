@@ -1618,6 +1618,8 @@ set_indexonlyscan_references(PlannerInfo *root,
 
 	pfree(index_itlist);
 
+	set_scan_predetoast_attrs(root, &plan->scan);
+
 	return (Plan *) plan;
 }
 

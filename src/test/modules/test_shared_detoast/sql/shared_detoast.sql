@@ -312,6 +312,15 @@ EXPLAIN (VERBOSE, COSTS OFF) SELECT doc->'a', doc->'b' FROM sd3 WHERE id = 1;
 SELECT doc->'a', doc->'b' FROM sd3 WHERE id = 1;
 RESET enable_seqscan; RESET enable_indexscan;
 DROP TABLE sd3, sd4, sd5;
+-- an index-only scan reads the index tuple, where a large included value is
+-- stored compressed: decompressed once
+CREATE INDEX sd_ctxt_idx ON sd (id) INCLUDE (ctxt);
+VACUUM sd;
+SET enable_seqscan = off; SET enable_bitmapscan = off;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT length(md5(ctxt)), ctxt = ctxt FROM sd WHERE id = 1;
+SELECT length(md5(ctxt)), ctxt = ctxt FROM sd WHERE id = 1;
+RESET enable_seqscan; RESET enable_bitmapscan;
+DROP INDEX sd_ctxt_idx;
 -- an inline column never detoasts
 SELECT small->'a', small->'b' FROM sd;
 -- switching the feature off restores one detoast per reference and skips the

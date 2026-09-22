@@ -960,6 +960,29 @@ NOTICE:  notice triggered for injection point detoast-attr-external
 
 RESET enable_seqscan; RESET enable_indexscan;
 DROP TABLE sd3, sd4, sd5;
+-- an index-only scan reads the index tuple, where a large included value is
+-- stored compressed: decompressed once
+CREATE INDEX sd_ctxt_idx ON sd (id) INCLUDE (ctxt);
+VACUUM sd;
+SET enable_seqscan = off; SET enable_bitmapscan = off;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT length(md5(ctxt)), ctxt = ctxt FROM sd WHERE id = 1;
+                   QUERY PLAN                   
+------------------------------------------------
+ Index Only Scan using sd_ctxt_idx on public.sd
+   Output: length(md5(ctxt)), (ctxt = ctxt)
+   Index Cond: (sd.id = 1)
+   Pre-detoast: ctxt
+(4 rows)
+
+SELECT length(md5(ctxt)), ctxt = ctxt FROM sd WHERE id = 1;
+NOTICE:  notice triggered for injection point detoast-attr-compressed
+ length | ?column? 
+--------+----------
+     32 | t
+(1 row)
+
+RESET enable_seqscan; RESET enable_bitmapscan;
+DROP INDEX sd_ctxt_idx;
 -- an inline column never detoasts
 SELECT small->'a', small->'b' FROM sd;
  ?column? | ?column? 
