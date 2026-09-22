@@ -26,9 +26,11 @@
 #include "optimizer/subselect.h"
 #include "optimizer/tlist.h"
 #include "parser/parse_relation.h"
+#include "parser/parsetree.h"
 #include "rewrite/rewriteManip.h"
 #include "tcop/utility.h"
 #include "utils/syscache.h"
+#include "utils/typcache.h"
 
 
 typedef enum
@@ -134,6 +136,7 @@ static bool flatten_rtes_walker(Node *node, flatten_rtes_walker_context *cxt);
 static void add_rte_to_flat_rtable(PlannerGlobal *glob, List *rteperminfos,
 								   RangeTblEntry *rte);
 static Plan *set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset);
+static void set_plan_predetoast_attrs(Plan *plan);
 static Plan *set_indexonlyscan_references(PlannerInfo *root,
 										  IndexOnlyScan *plan,
 										  int rtoffset);
@@ -628,6 +631,196 @@ add_rte_to_flat_rtable(PlannerGlobal *glob, List *rteperminfos,
 		newperminfo = addRTEPermissionInfo(&glob->finalrteperminfos, newrte);
 		memcpy(newperminfo, perminfo, sizeof(RTEPermissionInfo));
 	}
+}
+
+/* Detoast a toasted column once per row when several expressions reference it */
+bool		shared_detoast = true;
+
+/*
+ * toastable_type
+ *		Can values of this type be stored out of line or compressed?  The
+ *		type cache answers without a catalog fetch, unlike TypeIsToastable();
+ *		only varlena types have anything but PLAIN storage.
+ */
+static bool
+toastable_type(Oid typid)
+{
+	return lookup_type_cache(typid, 0)->typstorage != TYPSTORAGE_PLAIN;
+}
+
+/*
+ * join_side_quals
+ *		The expressions a join evaluates besides its targetlist: quals, join
+ *		quals and, being argument positions as well, the merge or hash
+ *		clauses.  The caller frees the list.
+ */
+static List *
+join_side_quals(Join *join)
+{
+	List	   *quals = list_concat_copy(join->joinqual, join->plan.qual);
+
+	if (IsA(join, MergeJoin))
+		quals = list_concat(quals, ((MergeJoin *) join)->mergeclauses);
+	else if (IsA(join, HashJoin))
+		quals = list_concat(quals, ((HashJoin *) join)->hashclauses);
+	return quals;
+}
+
+/*
+ * expand_append_members
+ *		Add to result the plans a node receives its input from through child,
+ *		looking through Append and MergeAppend, which hand their members'
+ *		slots up unchanged.
+ */
+static List *
+expand_append_members(Plan *child, List *result)
+{
+	if (child == NULL)
+		return result;
+	if (IsA(child, Append))
+	{
+		foreach_ptr(Plan, member, ((Append *) child)->appendplans)
+			result = expand_append_members(member, result);
+		return result;
+	}
+	if (IsA(child, MergeAppend))
+	{
+		foreach_ptr(Plan, member, ((MergeAppend *) child)->mergeplans)
+			result = expand_append_members(member, result);
+		return result;
+	}
+	return lappend(result, child);
+}
+
+/*
+ * input_predetoast_attrs
+ *		The attributes of one input of a node that its expressions may detoast
+ *		once per row: toastable attributes that two or more argument positions
+ *		of the targetlist and quals read, or one when single_ref_ok (the outer
+ *		side of a join, whose tuple stays put while the join runs its
+ *		expressions once per inner row, so the copy serves all of them).
+ *
+ * References split between this node and a scan it reads directly add up as
+ * well: a column the scan reads and this node reads through a plain Var of
+ * the scan in the child's targetlist is marked in both, so that the scan
+ * makes the copy on its reference and this node finds it, in the scan slot it
+ * reads directly or carried up by the scan's projection.  child is that
+ * input plan; an Append or MergeAppend of scans counts as its members.
+ * Parents that store the tuple first (a Hash node, a WindowAgg's tuplestore)
+ * pass NULL, since the copy does not reach them; a plain or sorted Agg reads
+ * the first row of each group from a copied tuple and shares from the second
+ * row on.  A child output column that is a constant or a row built in memory
+ * is never toasted and is skipped.
+ */
+static Bitmapset *
+input_predetoast_attrs(List *tlist, List *quals, Index varno,
+					   bool single_ref_ok, Plan *child)
+{
+	Bitmapset  *multi;
+	List	   *vars = pull_detoast_vars(tlist, quals, varno, &multi);
+	List	   *cands = NIL;
+	Bitmapset  *attrs = NULL;
+	List	   *members;
+	ListCell   *lc;
+
+	foreach(lc, vars)
+	{
+		Var		   *var = (Var *) lfirst(lc);
+		TargetEntry *tle;
+
+		if (!toastable_type(var->vartype))
+			continue;
+		if (child != NULL &&
+			(tle = get_tle_by_resno(child->targetlist, var->varattno)) != NULL &&
+			(IsA(tle->expr, Const) || IsA(tle->expr, RowExpr)))
+			continue;
+		cands = lappend(cands, var);
+		if (single_ref_ok || bms_is_member(var->varattno, multi))
+			attrs = bms_add_member(attrs, var->varattno);
+	}
+
+	members = expand_append_members(child, NIL);
+	foreach_ptr(Plan, member, members)
+	{
+		Bitmapset  *cmulti;
+		List	   *cvars;
+		Bitmapset  *cseen = NULL;
+		ListCell   *clc;
+
+		if (!IsScanPlan(member) || cands == NIL)
+			continue;
+		cvars = pull_detoast_vars(member->targetlist, member->qual, 0, &cmulti);
+		foreach(clc, cvars)
+			cseen = bms_add_member(cseen, ((Var *) lfirst(clc))->varattno);
+
+		foreach(clc, cands)
+		{
+			Var		   *var = (Var *) lfirst(clc);
+			TargetEntry *tle = get_tle_by_resno(member->targetlist,
+												var->varattno);
+			Node	   *expr;
+
+			if (tle == NULL)
+				continue;
+			expr = (Node *) tle->expr;
+			while (IsA(expr, RelabelType))
+				expr = (Node *) ((RelabelType *) expr)->arg;
+			if (!IsA(expr, Var) ||
+				!bms_is_member(((Var *) expr)->varattno, cseen))
+				continue;
+			member->predetoast_scanattrs =
+				bms_add_member(member->predetoast_scanattrs,
+							   ((Var *) expr)->varattno);
+			attrs = bms_add_member(attrs, var->varattno);
+		}
+		list_free(cvars);
+		bms_free(cmulti);
+		bms_free(cseen);
+	}
+	list_free(members);
+	list_free(cands);
+	list_free(vars);
+	bms_free(multi);
+	return attrs;
+}
+
+/*
+ * set_plan_predetoast_attrs
+ *		Record, once a node and its children have their references fixed,
+ *		which input attributes the executor may detoast once per row (see
+ *		input_predetoast_attrs).  Nothing about the sets affects results:
+ *		they only decide where the copy is worth making.
+ */
+static void
+set_plan_predetoast_attrs(Plan *plan)
+{
+	if (!shared_detoast)
+		return;
+
+	if (IsScanPlan(plan))
+		plan->predetoast_scanattrs =
+			input_predetoast_attrs(plan->targetlist, plan->qual, 0, false,
+								   NULL);
+	else if (IsA(plan, NestLoop) || IsA(plan, MergeJoin) || IsA(plan, HashJoin))
+	{
+		List	   *quals = join_side_quals((Join *) plan);
+
+		plan->predetoast_outerattrs =
+			input_predetoast_attrs(plan->targetlist, quals, OUTER_VAR, true,
+								   plan->lefttree);
+		plan->predetoast_innerattrs =
+			input_predetoast_attrs(plan->targetlist, quals, INNER_VAR, false,
+								   plan->righttree);
+		list_free(quals);
+	}
+	else if (IsA(plan, Agg))
+		plan->predetoast_outerattrs =
+			input_predetoast_attrs(plan->targetlist, plan->qual, OUTER_VAR,
+								   false, plan->lefttree);
+	else if (IsA(plan, WindowAgg))
+		plan->predetoast_outerattrs =
+			input_predetoast_attrs(plan->targetlist, plan->qual, OUTER_VAR,
+								   false, NULL);
 }
 
 /*
@@ -1357,6 +1550,12 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 	plan->lefttree = set_plan_refs(root, plan->lefttree, rtoffset);
 	plan->righttree = set_plan_refs(root, plan->righttree, rtoffset);
 
+	/*
+	 * With the node's and its children's expressions final, record what the
+	 * executor may detoast once per row.
+	 */
+	set_plan_predetoast_attrs(plan);
+
 	return plan;
 }
 
@@ -1430,6 +1629,8 @@ set_indexonlyscan_references(PlannerInfo *root,
 
 	pfree(index_itlist);
 
+	set_plan_predetoast_attrs((Plan *) plan);
+
 	return (Plan *) plan;
 }
 
@@ -1484,6 +1685,7 @@ set_subqueryscan_references(PlannerInfo *root,
 		plan->scan.plan.qual =
 			fix_scan_list(root, plan->scan.plan.qual,
 						  rtoffset, NUM_EXEC_QUAL((Plan *) plan));
+		set_plan_predetoast_attrs((Plan *) plan);
 
 		result = (Plan *) plan;
 	}
