@@ -7028,10 +7028,11 @@ pull_multi_detoast_walker(Node *node, pull_multi_detoast_context *context)
 }
 
 /*
- * pull_multi_detoast_vars
- *		Find scan-slot Vars that at least two expressions in a plan node's
- *		targetlist and qual would detoast, or at least one when single_ref_ok
- *		(for an input whose tuple stays put while the expressions run again).
+ * pull_detoast_vars
+ *		Find scan-slot Vars that a plan node's targetlist and qual would
+ *		detoast: the result holds one Var per attribute referenced two or more
+ *		times, *once_vars (if wanted) one Var per attribute referenced exactly
+ *		once.
  *
  * A reference counts when the Var is a direct argument of a function-like
  * node that reads the whole value and does not return it: function and
@@ -7040,15 +7041,17 @@ pull_multi_detoast_walker(Node *node, pull_multi_detoast_context *context)
  * that may return them unchanged (CASE, COALESCE, GREATEST/LEAST, NULLIF),
  * and Vars passed to functions known to read only a slice or the size of
  * their argument, or to a function that inspects the stored form, do not
- * count either.  Only Vars with the given varno count (0 means any, for scan
- * nodes; OUTER_VAR or INNER_VAR for joins and aggregates).  Returns one Var
- * per attribute number; the caller checks toastability.
+ * count.  Only Vars with the given varno count (0 means any, for scan nodes;
+ * OUTER_VAR or INNER_VAR for joins and aggregates).  The caller checks
+ * toastability.
  */
 List *
-pull_multi_detoast_vars(List *targetlist, List *qual, bool single_ref_ok,
-						Index varno)
+pull_detoast_vars(List *targetlist, List *qual, Index varno, List **once_vars)
 {
 	pull_multi_detoast_context context;
+	Bitmapset  *multi = NULL;
+	List	   *once = NIL;
+	ListCell   *lc;
 
 	context.varno = varno;
 	context.seen_once = NULL;
@@ -7057,12 +7060,19 @@ pull_multi_detoast_vars(List *targetlist, List *qual, bool single_ref_ok,
 
 	pull_multi_detoast_walker((Node *) targetlist, &context);
 	pull_multi_detoast_walker((Node *) qual, &context);
-
 	bms_free(context.seen_once);
-	if (single_ref_ok)
+
+	if (once_vars)
 	{
-		list_free(context.multi_vars);
-		return context.once_vars;
+		foreach(lc, context.multi_vars)
+			multi = bms_add_member(multi, ((Var *) lfirst(lc))->varattno);
+		foreach(lc, context.once_vars)
+		{
+			if (!bms_is_member(((Var *) lfirst(lc))->varattno, multi))
+				once = lappend(once, lfirst(lc));
+		}
+		bms_free(multi);
+		*once_vars = once;
 	}
 	list_free(context.once_vars);
 	return context.multi_vars;

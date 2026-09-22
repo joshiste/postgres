@@ -141,6 +141,10 @@ static Plan *set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset);
 static void set_scan_predetoast_attrs(PlannerInfo *root, Scan *scan);
 static void set_join_predetoast_attrs(Join *join);
 static void set_upper_predetoast_attrs(Plan *plan, Bitmapset **attrs);
+static List *join_side_quals(Join *join);
+static void add_cross_node_predetoast_attrs(Plan *child, List *ptlist,
+											List *pquals, Index varno,
+											Bitmapset **parent_attrs);
 static Plan *set_indexonlyscan_references(PlannerInfo *root,
 										  IndexOnlyScan *plan,
 										  int rtoffset);
@@ -675,7 +679,7 @@ set_scan_predetoast_attrs(PlannerInfo *root, Scan *scan)
 	if (!shared_detoast)
 		return;
 
-	vars = pull_multi_detoast_vars(plan->targetlist, plan->qual, false, 0);
+	vars = pull_detoast_vars(plan->targetlist, plan->qual, 0, NULL);
 	if (vars == NIL)
 		return;
 
@@ -727,26 +731,27 @@ static void
 set_join_predetoast_attrs(Join *join)
 {
 	Plan	   *plan = &join->plan;
-	List	   *quals = list_concat_copy(join->joinqual, plan->qual);
+	List	   *quals;
 	Index		sides[2] = {OUTER_VAR, INNER_VAR};
 	ListCell   *lc;
 
 	if (!shared_detoast)
 		return;
 
-	if (IsA(join, MergeJoin))
-		quals = list_concat(quals, ((MergeJoin *) join)->mergeclauses);
-	else if (IsA(join, HashJoin))
-		quals = list_concat(quals, ((HashJoin *) join)->hashclauses);
-
+	quals = join_side_quals(join);
 	for (int side = 0; side < 2; side++)
 	{
-		List	   *vars = pull_multi_detoast_vars(plan->targetlist, quals,
-												   sides[side] == OUTER_VAR,
-												   sides[side]);
+		List	   *once = NIL;
+		List	   *vars = pull_detoast_vars(plan->targetlist, quals,
+											 sides[side], &once);
 		Plan	   *child = sides[side] == OUTER_VAR ?
 			plan->lefttree : plan->righttree;
 		Bitmapset  *attrs = NULL;
+
+		if (sides[side] == OUTER_VAR)
+			vars = list_concat(vars, once);
+		else
+			list_free(once);
 
 		foreach(lc, vars)
 		{
@@ -796,8 +801,7 @@ set_upper_predetoast_attrs(Plan *plan, Bitmapset **attrs)
 	if (!shared_detoast)
 		return;
 
-	vars = pull_multi_detoast_vars(plan->targetlist, plan->qual, false,
-								   OUTER_VAR);
+	vars = pull_detoast_vars(plan->targetlist, plan->qual, OUTER_VAR, NULL);
 	foreach(lc, vars)
 	{
 		Var		   *var = (Var *) lfirst(lc);
@@ -806,6 +810,139 @@ set_upper_predetoast_attrs(Plan *plan, Bitmapset **attrs)
 			*attrs = bms_add_member(*attrs, var->varattno);
 	}
 	list_free(vars);
+}
+
+/*
+ * join_side_quals
+ *		The expressions a join evaluates besides its targetlist: quals, join
+ *		quals and, being argument positions as well, the merge or hash
+ *		clauses.  The caller frees the list.
+ */
+static List *
+join_side_quals(Join *join)
+{
+	List	   *quals = list_concat_copy(join->joinqual, join->plan.qual);
+
+	if (IsA(join, MergeJoin))
+		quals = list_concat(quals, ((MergeJoin *) join)->mergeclauses);
+	else if (IsA(join, HashJoin))
+		quals = list_concat(quals, ((HashJoin *) join)->hashclauses);
+	return quals;
+}
+
+/*
+ * expand_append_members
+ *		Add to result the plans a node receives its input from through child,
+ *		looking through Append and MergeAppend, which hand their members'
+ *		slots up unchanged.
+ */
+static List *
+expand_append_members(Plan *child, List *result)
+{
+	if (child == NULL)
+		return result;
+	if (IsA(child, Append))
+	{
+		foreach_ptr(Plan, member, ((Append *) child)->appendplans)
+			result = expand_append_members(member, result);
+		return result;
+	}
+	if (IsA(child, MergeAppend))
+	{
+		foreach_ptr(Plan, member, ((MergeAppend *) child)->mergeplans)
+			result = expand_append_members(member, result);
+		return result;
+	}
+	return lappend(result, child);
+}
+
+/*
+ * add_cross_node_predetoast_attrs
+ *		Count references across a bare projection.
+ *
+ * A column a scan reads once and its parent reads once, through a plain Var
+ * of the scan in the child's targetlist, is detoasted in both nodes.  Marked
+ * in both, the scan makes the copy on its reference and the parent finds it,
+ * in the scan slot it reads directly or carried up by the scan's projection.
+ * The same goes for one side reading it twice and the other once.  This is
+ * only worth doing for parents that read the child's slot as the child
+ * returns it: joins on either side and Agg.  A Hash node and a WindowAgg's
+ * tuplestore store the tuple, where the copy does not reach them; a plain or
+ * sorted Agg reads the first row of each group from a copied tuple as well
+ * and shares from the second row on.  Append and MergeAppend members count
+ * as children of the node above them.
+ */
+static void
+add_cross_node_predetoast_attrs(Plan *child, List *ptlist, List *pquals,
+								Index varno, Bitmapset **parent_attrs)
+{
+	List	   *members = expand_append_members(child, NIL);
+	List	   *ponce = NIL;
+	List	   *pmulti;
+	Bitmapset  *pmulti_attrs = NULL;
+	List	   *pvars;
+	ListCell   *lc;
+
+	pmulti = pull_detoast_vars(ptlist, pquals, varno, &ponce);
+	foreach(lc, pmulti)
+		pmulti_attrs = bms_add_member(pmulti_attrs, ((Var *) lfirst(lc))->varattno);
+	pvars = list_concat(pmulti, ponce);
+
+	foreach_ptr(Plan, member, members)
+	{
+		Scan	   *scan = (Scan *) member;
+		List	   *conce = NIL;
+		List	   *cmulti;
+		Bitmapset  *conce_attrs = NULL;
+		Bitmapset  *cmulti_attrs = NULL;
+		ListCell   *plc;
+
+		if (!IsScanPlan(member) || pvars == NIL)
+			continue;
+
+		cmulti = pull_detoast_vars(member->targetlist, member->qual, 0, &conce);
+		foreach(plc, cmulti)
+			cmulti_attrs = bms_add_member(cmulti_attrs, ((Var *) lfirst(plc))->varattno);
+		foreach(plc, conce)
+			conce_attrs = bms_add_member(conce_attrs, ((Var *) lfirst(plc))->varattno);
+
+		foreach(plc, pvars)
+		{
+			Var		   *pvar = (Var *) lfirst(plc);
+			TargetEntry *tle;
+			Node	   *expr;
+			AttrNumber	cattno;
+
+			if (!toastable_type(pvar->vartype) ||
+				pvar->varattno > list_length(member->targetlist))
+				continue;
+			tle = list_nth_node(TargetEntry, member->targetlist,
+								pvar->varattno - 1);
+			expr = (Node *) tle->expr;
+			while (IsA(expr, RelabelType))
+				expr = (Node *) ((RelabelType *) expr)->arg;
+			if (!IsA(expr, Var) || ((Var *) expr)->varattno <= 0)
+				continue;
+			cattno = ((Var *) expr)->varattno;
+
+			/* the scan must read the column itself for there to be a copy */
+			if (!bms_is_member(cattno, cmulti_attrs) &&
+				!bms_is_member(cattno, conce_attrs))
+				continue;
+
+			/* both sides read it, so the counts add up to two or more */
+			scan->predetoast_attrs = bms_add_member(scan->predetoast_attrs,
+													cattno);
+			*parent_attrs = bms_add_member(*parent_attrs, pvar->varattno);
+		}
+		list_free(cmulti);
+		list_free(conce);
+		bms_free(cmulti_attrs);
+		bms_free(conce_attrs);
+	}
+	list_free(pvars);
+	bms_free(pmulti_attrs);
+	list_free(members);
 }
 
 /*
@@ -1544,6 +1681,34 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 	 */
 	plan->lefttree = set_plan_refs(root, plan->lefttree, rtoffset);
 	plan->righttree = set_plan_refs(root, plan->righttree, rtoffset);
+
+	/*
+	 * With the children's sets known, references a scan and this node split
+	 * between them can be counted together (see
+	 * add_cross_node_predetoast_attrs).
+	 */
+	if (shared_detoast)
+	{
+		if (IsA(plan, NestLoop) || IsA(plan, MergeJoin) || IsA(plan, HashJoin))
+		{
+			Join	   *join = (Join *) plan;
+			List	   *quals = join_side_quals(join);
+
+			add_cross_node_predetoast_attrs(plan->lefttree, plan->targetlist,
+											quals, OUTER_VAR,
+											&join->predetoast_outer_attrs);
+			if (!IsA(plan, HashJoin))
+				add_cross_node_predetoast_attrs(plan->righttree,
+												plan->targetlist, quals,
+												INNER_VAR,
+												&join->predetoast_inner_attrs);
+			list_free(quals);
+		}
+		else if (IsA(plan, Agg))
+			add_cross_node_predetoast_attrs(plan->lefttree, plan->targetlist,
+											plan->qual, OUTER_VAR,
+											&((Agg *) plan)->predetoast_outer_attrs);
+	}
 
 	return plan;
 }

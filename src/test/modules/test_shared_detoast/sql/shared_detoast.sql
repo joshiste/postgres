@@ -133,6 +133,12 @@ SET enable_nestloop = off; SET enable_mergejoin = off;
 EXPLAIN (VERBOSE, COSTS OFF) SELECT count(*) FROM sd p JOIN sd2 q ON p.doc = q.doc WHERE p.doc ? 'a' AND p.doc @> '{"b": 2}';
 SELECT count(*) FROM sd p JOIN sd2 q ON p.doc = q.doc WHERE p.doc ? 'a' AND p.doc @> '{"b": 2}';
 RESET enable_nestloop; RESET enable_mergejoin;
+-- references split between a scan and the join above it add up as well,
+-- on either side: one detoast
+SET enable_hashjoin = off; SET enable_mergejoin = off;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT q.doc->>'a' FROM sd p JOIN sd2 q ON p.id = q.id WHERE q.doc ? 'a';
+SELECT q.doc->>'a' FROM sd p JOIN sd2 q ON p.id = q.id WHERE q.doc ? 'a';
+RESET enable_hashjoin; RESET enable_mergejoin;
 -- a merge join key that a join filter references again is compared from the
 -- same copy: one detoast per side
 SET enable_nestloop = off; SET enable_hashjoin = off;
@@ -166,14 +172,20 @@ SELECT count(*) FROM sd WHERE doc ? 'a' AND doc @> '{"b": 2}' GROUP BY id;
 -- (its hash is computed from the stored datum, hence one more detoast)
 SELECT count(*) FROM sd WHERE doc ? 'a' AND doc @> '{"b": 2}' GROUP BY doc;
 -- an aggregated column the hashed Agg would spill by value is the stored
--- pointer too: the scan shares its two references, the aggregate argument
--- detoasts on its own
+-- pointer too, while the aggregate argument shares the copy the scan's two
+-- references made: one detoast
 EXPLAIN (VERBOSE, COSTS OFF) SELECT id, sum((doc->>'a')::int) FROM sd WHERE doc ? 'a' AND doc @> '{"b": 2}' GROUP BY id;
 SELECT id, sum((doc->>'a')::int) FROM sd WHERE doc ? 'a' AND doc @> '{"b": 2}' GROUP BY id;
 RESET enable_sort;
 -- aggregate arguments referencing the same input column detoast it once
 EXPLAIN (VERBOSE, COSTS OFF) SELECT sum((doc->>'a')::int), sum((doc->>'b')::int) FROM sd;
 SELECT sum((doc->>'a')::int), sum((doc->>'b')::int) FROM sd;
+-- references split between the scan and the aggregate add up: the scan's
+-- single filter reference makes the copy and the aggregate argument finds
+-- it, except for the first row of a plain or sorted aggregate group, which
+-- the Agg reads from a copied tuple (two detoasts here, for one row)
+EXPLAIN (VERBOSE, COSTS OFF) SELECT sum((doc->>'a')::int) FROM sd WHERE doc ? 'a';
+SELECT sum((doc->>'a')::int) FROM sd WHERE doc ? 'a';
 -- an aggregate taking the column whole gets the stored pointer, the others
 -- still share: one detoast
 SELECT sum((doc->>'a')::int), sum((doc->>'b')::int), count(doc) FROM sd;
@@ -190,6 +202,12 @@ INSERT INTO sdp SELECT i, doc FROM sd, (VALUES (1), (12)) v(i);
 VACUUM ANALYZE sdp;
 SELECT pg_column_toast_chunk_id(d) IS NOT NULL AS pointer_kept, a, b
 FROM (SELECT doc->'a' AS a, doc->'b' AS b, doc AS d FROM sdp OFFSET 0) s;
+-- references split between partition scans and a hashed aggregate above
+-- the Append add up too: one detoast per row
+SET enable_sort = off;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT count(*) FROM (SELECT id, sum((doc->>'a')::int) FROM sdp WHERE doc ? 'a' GROUP BY id) g;
+SELECT count(*) FROM (SELECT id, sum((doc->>'a')::int) FROM sdp WHERE doc ? 'a' GROUP BY id) g;
+RESET enable_sort;
 -- partition scans under a storing parent: one detoast per row
 EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM sdp WHERE doc ? 'a' AND doc @> '{"b": 2}' ORDER BY id;
 WITH s AS MATERIALIZED (SELECT * FROM sdp WHERE doc ? 'a' AND doc @> '{"b": 2}' ORDER BY id)
@@ -289,6 +307,9 @@ CREATE TABLE sd5 AS SELECT id, doc FROM sd3 WHERE doc ? 'a' AND doc ? 'b';
 SELECT pg_column_toast_chunk_id(doc) IS NOT NULL AS pointer_kept, id FROM sd5 ORDER BY id;
 -- an aggregate that keeps its argument whole gets the stored pointer
 SELECT jsonb_agg(doc ORDER BY id) IS NOT NULL FROM sd3 WHERE doc ? 'a' AND doc ? 'b';
+-- a plain aggregate over several rows: the first row detoasts in the scan and
+-- again from the Agg's copied tuple, the second row shares (three in all)
+SELECT sum((doc->>'a')::int) FROM sd3 WHERE doc ? 'a';
 -- window functions: the output expressions are evaluated by the WindowAgg on
 -- rows read back from its tuplestore and share there; the scan's single
 -- qual reference detoasts on its own (two detoasts per row)
