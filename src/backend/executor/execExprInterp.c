@@ -741,10 +741,15 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		{
 			int			attnum = op->d.var.attnum;
 
-			/* only out-of-line or compressed values are worth the call */
+			/*
+			 * Only out-of-line or compressed values are worth the call; short
+			 * values with a one-byte header are not, and testing for them
+			 * here keeps a column of short strings on the inline path.
+			 */
 			Assert(attnum >= 0 && attnum < innerslot->tts_nvalid);
 			if (!innerslot->tts_isnull[attnum] &&
-				VARATT_IS_EXTENDED(DatumGetPointer(innerslot->tts_values[attnum])))
+				(VARATT_IS_COMPRESSED(DatumGetPointer(innerslot->tts_values[attnum])) ||
+				 VARATT_IS_EXTERNAL(DatumGetPointer(innerslot->tts_values[attnum]))))
 				ExecEvalVarToast(state, op, econtext, innerslot);
 			else
 			{
@@ -759,10 +764,15 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		{
 			int			attnum = op->d.var.attnum;
 
-			/* only out-of-line or compressed values are worth the call */
+			/*
+			 * Only out-of-line or compressed values are worth the call; short
+			 * values with a one-byte header are not, and testing for them
+			 * here keeps a column of short strings on the inline path.
+			 */
 			Assert(attnum >= 0 && attnum < outerslot->tts_nvalid);
 			if (!outerslot->tts_isnull[attnum] &&
-				VARATT_IS_EXTENDED(DatumGetPointer(outerslot->tts_values[attnum])))
+				(VARATT_IS_COMPRESSED(DatumGetPointer(outerslot->tts_values[attnum])) ||
+				 VARATT_IS_EXTERNAL(DatumGetPointer(outerslot->tts_values[attnum]))))
 				ExecEvalVarToast(state, op, econtext, outerslot);
 			else
 			{
@@ -777,10 +787,15 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		{
 			int			attnum = op->d.var.attnum;
 
-			/* only out-of-line or compressed values are worth the call */
+			/*
+			 * Only out-of-line or compressed values are worth the call; short
+			 * values with a one-byte header are not, and testing for them
+			 * here keeps a column of short strings on the inline path.
+			 */
 			Assert(attnum >= 0 && attnum < scanslot->tts_nvalid);
 			if (!scanslot->tts_isnull[attnum] &&
-				VARATT_IS_EXTENDED(DatumGetPointer(scanslot->tts_values[attnum])))
+				(VARATT_IS_COMPRESSED(DatumGetPointer(scanslot->tts_values[attnum])) ||
+				 VARATT_IS_EXTERNAL(DatumGetPointer(scanslot->tts_values[attnum]))))
 				ExecEvalVarToast(state, op, econtext, scanslot);
 			else
 			{
