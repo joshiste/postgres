@@ -453,6 +453,23 @@ partitions.
 
 ## Rebase log
 
+## Series restructured to executor/planner split (tip 1668413408, base upstream
+9bfdcfbfcf), 2026-09-23
+
+The series was resplit from the earlier shape into: "Executor support for detoasting a
+column once per row" (the slot side array, opcodes, ExecInitDetoastArg, reset
+discipline), "Decide at plan time which columns to detoast once per row" (the setrefs
+walkers and per-node sets, syscache addition), then "Show and test", then the doc.
+Also rebased onto upstream 9bfdcfbfcf (9 commits past the previous base). Module SQL
+grew further. Not a behaviour change from tip 3561bc0f47; a cleaner two-commit split
+of mechanism vs decision for review.
+
+Verified on 1668413408: Mac pgindent, build (0 warnings), module (both settings),
+regression 239/239, postgres_fdw, guard 30/30; each of the three intermediate commits
+builds standalone with 0 warnings; VM cassert module, guard, check-world; harness
+deltas unchanged; workload CPU as before (Bartunov 1.5-2.5x, JSONBench neutral, off =
+master, results identical); fork CI run 35845760052 (result below). detoast-plan2
+rebased on it. Not pushed to shared-detoast/detoast-plan2 on the fork.
 ## Slot-reset hardening (tip 3561bc0f47, base upstream e8a3ee5b19), 2026-09-22
 
 Correctness round folded in as three fixups (verified tip 49e46f72e5 -> 3561bc0f47,
