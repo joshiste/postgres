@@ -468,7 +468,7 @@ Verified on 1668413408: Mac pgindent, build (0 warnings), module (both settings)
 regression 239/239, postgres_fdw, guard 30/30; each of the three intermediate commits
 builds standalone with 0 warnings; VM cassert module, guard, check-world; harness
 deltas unchanged; workload CPU as before (Bartunov 1.5-2.5x, JSONBench neutral, off =
-master, results identical); fork CI run 35845760052 (result below). detoast-plan2
+master, results identical); fork CI run 35845760052 fully green (Linux incl. ASAN, macOS, both Windows toolchains). detoast-plan2
 rebased on it. Not pushed to shared-detoast/detoast-plan2 on the fork.
 ## Slot-reset hardening (tip 3561bc0f47, base upstream e8a3ee5b19), 2026-09-22
 
