@@ -2569,9 +2569,15 @@ predetoast_attr_names(Bitmapset *attrs, Index varno, TupleDesc desc,
 
 	while ((attno = bms_next_member(attrs, attno)) >= 0)
 	{
-		Form_pg_attribute att = TupleDescAttr(desc, attno - 1);
-		Var		   *var = makeVar(varno, attno, att->atttypid, att->atttypmod,
-								  att->attcollation, 0);
+		Form_pg_attribute att;
+		Var		   *var;
+
+		/* a set is only ever advisory, so print what is printable */
+		if (attno <= 0 || attno > desc->natts)
+			continue;
+		att = TupleDescAttr(desc, attno - 1);
+		var = makeVar(varno, attno, att->atttypid, att->atttypmod,
+					  att->attcollation, 0);
 
 		names = lappend(names, deparse_expression((Node *) var, context,
 												  useprefix, false));

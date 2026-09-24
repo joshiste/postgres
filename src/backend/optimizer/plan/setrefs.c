@@ -136,6 +136,7 @@ static bool flatten_rtes_walker(Node *node, flatten_rtes_walker_context *cxt);
 static void add_rte_to_flat_rtable(PlannerGlobal *glob, List *rteperminfos,
 								   RangeTblEntry *rte);
 static Plan *set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset);
+static Index scan_tuple_varno(Plan *plan);
 static void set_plan_predetoast_attrs(Plan *plan);
 static Plan *set_indexonlyscan_references(PlannerInfo *root,
 										  IndexOnlyScan *plan,
@@ -649,6 +650,20 @@ toastable_type(Oid typid)
 }
 
 /*
+ * scan_tuple_varno
+ *		The varno the expressions of a scan node use for its scan tuple: its
+ *		own range table index, or INDEX_VAR for the scans whose tuple has a
+ *		shape of its own (see ScanUsesIndexVar).  Both spaces never occur in
+ *		one node's targetlist and qual, but naming the right one keeps the
+ *		attribute numbers we record in the space the executor reads them in.
+ */
+static Index
+scan_tuple_varno(Plan *plan)
+{
+	return ScanUsesIndexVar(plan) ? INDEX_VAR : ((Scan *) plan)->scanrelid;
+}
+
+/*
  * join_side_quals
  *		The expressions a join evaluates besides its targetlist: quals, join
  *		quals and, being argument positions as well, the merge or hash
@@ -749,7 +764,8 @@ input_predetoast_attrs(List *tlist, List *quals, Index varno,
 
 		if (!IsScanPlan(member) || cands == NIL)
 			continue;
-		cvars = pull_detoast_vars(member->targetlist, member->qual, 0, &cmulti);
+		cvars = pull_detoast_vars(member->targetlist, member->qual,
+								  scan_tuple_varno(member), &cmulti);
 		foreach(clc, cvars)
 			cseen = bms_add_member(cseen, ((Var *) lfirst(clc))->varattno);
 
@@ -799,8 +815,8 @@ set_plan_predetoast_attrs(Plan *plan)
 
 	if (IsScanPlan(plan))
 		plan->predetoast_scanattrs =
-			input_predetoast_attrs(plan->targetlist, plan->qual, 0, false,
-								   NULL);
+			input_predetoast_attrs(plan->targetlist, plan->qual,
+								   scan_tuple_varno(plan), false, NULL);
 	else if (IsA(plan, NestLoop) || IsA(plan, MergeJoin) || IsA(plan, HashJoin))
 	{
 		List	   *quals = join_side_quals((Join *) plan);
