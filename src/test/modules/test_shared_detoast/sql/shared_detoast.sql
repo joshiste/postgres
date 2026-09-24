@@ -344,12 +344,25 @@ RESET enable_seqscan; RESET enable_bitmapscan;
 DROP INDEX sd_ctxt_idx;
 -- an inline column never detoasts
 SELECT small->'a', small->'b' FROM sd;
+-- COPY compiles its WHERE clause against a ModifyTableState it builds
+-- itself, which has no plan and no PlannedStmt to consult
+CREATE TEMP TABLE sdcopy (id int, doc jsonb);
+COPY sdcopy FROM stdin WHERE doc ? 'a' AND doc ? 'b';
+1	{"a": 1, "b": 2}
+2	{"c": 3}
+\.
+SELECT count(*) FROM sdcopy;
+DROP TABLE sdcopy;
 -- switching the feature off restores one detoast per reference and skips the
 -- planning work: no Pre-detoast line
 SET shared_detoast = off;
 SELECT doc->'a', doc->'b' FROM sd;
 EXPLAIN (VERBOSE, COSTS OFF) SELECT doc->'a', doc->'b' FROM sd;
+-- it covers the parameter path too, which no plan node's set can express:
+-- two references inside a correlated subplan, so the copy is the parameter's
+SELECT (SELECT (doc->>'a')::int + (doc->>'b')::int) FROM sd;
 RESET shared_detoast;
+SELECT (SELECT (doc->>'a')::int + (doc->>'b')::int) FROM sd;
 
 SELECT injection_points_detach('detoast-attr-external');
 SELECT injection_points_detach('detoast-attr-compressed');

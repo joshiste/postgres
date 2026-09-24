@@ -111,19 +111,35 @@ static void ExecInitJsonCoercion(ExprState *state, JsonReturning *returning,
 
 /*
  * Prepare evaluation of an argument whose whole value the consuming step
- * reads.  Only a PARAM_EXEC parameter, or a Var on a node that detoasts
- * something once per row, can have a copy to hand out; everything else, the
+ * reads.  A Var can have a copy to hand out when its own node detoasts
+ * something once per row, a PARAM_EXEC parameter when any node of the plan
+ * does, since the copy it finds was made elsewhere; everything else, the
  * common case, is ExecInitExprRec without further ado.
  */
 static inline void
 ExecInitDetoastArg(Expr *arg, ExprState *state, Datum *resv, bool *resnull)
 {
+	PlanState  *parent = state->parent;
 	Expr	   *expr = arg;
-	Plan	   *plan = state->parent ? state->parent->plan : NULL;
+	Plan	   *plan;
+	PlannedStmt *pstmt;
+
+	/*
+	 * Expressions outside a plan tree, and the ones COPY compiles against a
+	 * ModifyTableState it builds itself, have no plan to ask.
+	 */
+	if (parent == NULL)
+	{
+		ExecInitExprRec(arg, state, resv, resnull);
+		return;
+	}
+	plan = parent->plan;
+	pstmt = parent->state ? parent->state->es_plannedstmt : NULL;
 
 	while (IsA(expr, RelabelType))
 		expr = ((RelabelType *) expr)->arg;
-	if (!((IsA(expr, Param) && ((Param *) expr)->paramkind == PARAM_EXEC) ||
+	if (!((IsA(expr, Param) && ((Param *) expr)->paramkind == PARAM_EXEC &&
+		   pstmt != NULL && pstmt->predetoastEnabled) ||
 		  (IsA(expr, Var) && plan != NULL &&
 		   (plan->predetoast_scanattrs != NULL ||
 			plan->predetoast_outerattrs != NULL ||

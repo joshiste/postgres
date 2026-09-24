@@ -1081,6 +1081,17 @@ SELECT small->'a', small->'b' FROM sd;
  1        | 2
 (1 row)
 
+-- COPY compiles its WHERE clause against a ModifyTableState it builds
+-- itself, which has no plan and no PlannedStmt to consult
+CREATE TEMP TABLE sdcopy (id int, doc jsonb);
+COPY sdcopy FROM stdin WHERE doc ? 'a' AND doc ? 'b';
+SELECT count(*) FROM sdcopy;
+ count 
+-------
+     1
+(1 row)
+
+DROP TABLE sdcopy;
 -- switching the feature off restores one detoast per reference and skips the
 -- planning work: no Pre-detoast line
 SET shared_detoast = off;
@@ -1099,7 +1110,24 @@ EXPLAIN (VERBOSE, COSTS OFF) SELECT doc->'a', doc->'b' FROM sd;
    Output: (doc -> 'a'::text), (doc -> 'b'::text)
 (2 rows)
 
+-- it covers the parameter path too, which no plan node's set can express:
+-- two references inside a correlated subplan, so the copy is the parameter's
+SELECT (SELECT (doc->>'a')::int + (doc->>'b')::int) FROM sd;
+NOTICE:  notice triggered for injection point detoast-attr-external
+NOTICE:  notice triggered for injection point detoast-attr-external
+ ?column? 
+----------
+        3
+(1 row)
+
 RESET shared_detoast;
+SELECT (SELECT (doc->>'a')::int + (doc->>'b')::int) FROM sd;
+NOTICE:  notice triggered for injection point detoast-attr-external
+ ?column? 
+----------
+        3
+(1 row)
+
 SELECT injection_points_detach('detoast-attr-external');
  injection_points_detach 
 -------------------------

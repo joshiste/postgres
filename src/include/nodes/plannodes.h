@@ -83,6 +83,15 @@ typedef struct PlannedStmt
 	/* do I set the command result tag? */
 	bool		canSetTag;
 
+	/*
+	 * Was this plan built with detoasting a column once per row enabled? The
+	 * per-node decisions are in the Plan nodes; expression initialization
+	 * consults this where there is no node to ask, namely for the parameters
+	 * a subplan or a nestloop inner plan receives, whose copy was made
+	 * elsewhere (see ExecInitDetoastArg).
+	 */
+	bool		predetoastEnabled;
+
 	/* redo plan when TransactionXmin changes? */
 	bool		transientPlan;
 

@@ -5840,8 +5840,8 @@ ExecEvalParamExecToast(ExprState *state, ExprEvalStep *op,
 	if (prm->isnull || slot == NULL)
 		return;
 	attnum = prm->detoast_attnum - 1;
-	if (attnum >= slot->tts_nvalid || slot->tts_isnull[attnum] ||
-		slot->tts_values[attnum] != prm->value)
+	if (attnum < 0 || attnum >= slot->tts_nvalid ||
+		slot->tts_isnull[attnum] || slot->tts_values[attnum] != prm->value)
 		return;
 	attr = (varlena *) DatumGetPointer(prm->value);
 	if (VARATT_IS_EXTERNAL_ONDISK(attr) || VARATT_IS_COMPRESSED(attr))
