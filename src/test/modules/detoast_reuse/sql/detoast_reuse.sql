@@ -30,7 +30,11 @@ SELECT 1,
        '{"a": 1, "b": 2}',
        'abc' || repeat(md5('x'), 200),
        repeat('x', 50000);
-VACUUM ANALYZE sd;
+-- a second copy with several rows, for the parallel case below
+CREATE TABLE sdpar (id int, doc jsonb);
+ALTER TABLE sdpar ALTER COLUMN doc SET STORAGE EXTERNAL;
+INSERT INTO sdpar SELECT i, doc FROM sd, generate_series(1, 4) i;
+VACUUM ANALYZE sd, sdpar;
 SELECT pg_column_size(doc) > 8192 AS doc_external,
        pg_column_toast_chunk_id(doc) IS NOT NULL AS doc_has_chunks,
        pg_column_toast_chunk_id(ctxt) IS NULL AS ctxt_inline,
@@ -38,9 +42,11 @@ SELECT pg_column_size(doc) > 8192 AS doc_external,
 FROM sd;
 
 CREATE EXTENSION injection_points;
-SELECT injection_points_set_local();
--- the points are attached in this backend only, so nothing may run in a
--- parallel worker (some CI runs default to debug_parallel_query = regress)
+-- attached for the whole instance rather than this backend, so that the
+-- detoasts a parallel worker performs are counted as well; every statement
+-- but the parallel case below runs without workers, since some CI runs
+-- default to debug_parallel_query = regress and that would split the counts
+-- across processes for no purpose
 SET debug_parallel_query = off;
 SELECT injection_points_attach('detoast-attr-external', 'notice');
 SELECT injection_points_attach('detoast-attr-compressed', 'notice');
@@ -82,21 +88,16 @@ SELECT doc->'a', doc->'b' FROM sd FOR UPDATE;
 CREATE TEMP TABLE before AS SELECT pg_column_toast_chunk_id(doc) AS chunk FROM sd;
 UPDATE sd SET small = small WHERE doc ? 'a' AND doc @> '{"b": 2}';
 SELECT pg_column_toast_chunk_id(doc) = (SELECT chunk FROM before) AS pointer_kept FROM sd;
--- parallel workers detoast once as well; locally attached injection points are
--- not seen by worker processes, so compare buffer counts instead: the second
--- reference must not fetch the document's toast chunks again (dozens of
--- blocks; a fresh worker's catalog reads make the counts vary by a few)
-CREATE FUNCTION shared_blocks(q text) RETURNS bigint LANGUAGE plpgsql AS $$
-DECLARE j jsonb;
-BEGIN
-    EXECUTE q;                                  -- warm the cache
-    EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON) ' || q INTO j;
-    RETURN (j->0->'Plan'->>'Shared Hit Blocks')::bigint + (j->0->'Plan'->>'Shared Read Blocks')::bigint;
-END $$;
-SET debug_parallel_query = on;
-SELECT abs(shared_blocks($$SELECT doc->'a', doc->'b' FROM sd$$) - shared_blocks($$SELECT doc->'a' FROM sd$$)) < 10 AS no_extra_toast_fetches;
-SET debug_parallel_query = off;
-DROP FUNCTION shared_blocks(text);
+-- a parallel worker detoasts once per row like the leader: four rows give
+-- four detoasts however they are split between the two processes, where one
+-- detoast per reference would give eight
+SET max_parallel_workers_per_gather = 2;
+SET parallel_setup_cost = 0; SET parallel_tuple_cost = 0;
+SET min_parallel_table_scan_size = 0;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM sdpar WHERE doc ? 'a' AND doc @> '{"b": 2}';
+SELECT count(*) FROM sdpar WHERE doc ? 'a' AND doc @> '{"b": 2}';
+RESET max_parallel_workers_per_gather; RESET parallel_setup_cost;
+RESET parallel_tuple_cost; RESET min_parallel_table_scan_size;
 -- joins: the expressions are evaluated at the join and the copy is kept
 -- beside the child's slot; hash join (probe side), nested loop (both sides)
 -- and both sides of a merge join detoast once
@@ -346,7 +347,7 @@ SELECT (SELECT (doc->>'a')::int + (doc->>'b')::int) FROM sd;
 
 SELECT injection_points_detach('detoast-attr-external');
 SELECT injection_points_detach('detoast-attr-compressed');
-DROP TABLE sd;
+DROP TABLE sd, sdpar;
 
 -- A slot refilled through a path other than ExecStore*/ExecClearTuple must
 -- drop its copies too: a multi-batch hash join re-reads the probe side's
