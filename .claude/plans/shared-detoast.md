@@ -453,6 +453,13 @@ partitions.
 
 ## Rebase log
 
+- 2026-09-24: series rebased onto upstream master 4545cee303 (10 commits, none
+  touching files the series changes, no conflicts). Tip 18f9a3bc75: Mac pgindent,
+  build (0 warnings), module (both settings), regression 239/239, postgres_fdw, guard
+  30/30 (the first guard run exited 127 on a stale scratch harness dir missing run.sh,
+  not a code issue; rerun clean); VM cassert module, guard, check-world; harness deltas
+  unchanged; workload CPU as before; fork CI run 35975082463 (result below).
+  detoast-plan2 rebased onto it. Not pushed to shared-detoast/detoast-plan2 on the fork.
 ## Series restructured to executor/planner split (tip 1668413408, base upstream
 9bfdcfbfcf), 2026-09-23
 
