@@ -141,7 +141,7 @@ typedef enum
 extern bool contain_mutable_functions(Node *clause);
 extern bool contain_mutable_functions_after_planning(Expr *expr);
 extern bool contain_volatile_functions(Node *clause);
-extern PGDLLIMPORT bool shared_detoast;
+extern PGDLLIMPORT bool detoast_reuse;
 extern List *pull_detoast_vars(List *targetlist, List *qual, Index varno,
 							   Bitmapset **multi);
 extern bool contain_volatile_functions_after_planning(Expr *expr);

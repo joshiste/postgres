@@ -86,9 +86,9 @@ typedef enum ExprEvalOp
 	EEOP_NEW_VAR,
 
 	/* compute Var value from the detoasted copy kept beside the slot */
-	EEOP_INNER_VAR_TOAST,
-	EEOP_OUTER_VAR_TOAST,
-	EEOP_SCAN_VAR_TOAST,
+	EEOP_INNER_VAR_DETOAST,
+	EEOP_OUTER_VAR_DETOAST,
+	EEOP_SCAN_VAR_DETOAST,
 
 	/* compute system Var value */
 	EEOP_INNER_SYSVAR,
@@ -112,9 +112,9 @@ typedef enum ExprEvalOp
 	EEOP_ASSIGN_NEW_VAR,
 
 	/* same, also carrying the slot's detoasted copy of the value along */
-	EEOP_ASSIGN_INNER_VAR_TOAST,
-	EEOP_ASSIGN_OUTER_VAR_TOAST,
-	EEOP_ASSIGN_SCAN_VAR_TOAST,
+	EEOP_ASSIGN_INNER_VAR_DETOAST,
+	EEOP_ASSIGN_OUTER_VAR_DETOAST,
+	EEOP_ASSIGN_SCAN_VAR_DETOAST,
 
 	/* assign ExprState's resvalue/resnull to a column of its resultslot */
 	EEOP_ASSIGN_TMP,
@@ -181,7 +181,7 @@ typedef enum ExprEvalOp
 
 	/* evaluate PARAM_EXEC/EXTERN parameters */
 	EEOP_PARAM_EXEC,
-	EEOP_PARAM_EXEC_TOAST,		/* same, preferring the detoasted copy */
+	EEOP_PARAM_EXEC_DETOAST,	/* same, preferring the detoasted copy */
 	EEOP_PARAM_EXTERN,
 	EEOP_PARAM_CALLBACK,
 	/* set PARAM_EXEC value */
@@ -872,8 +872,8 @@ extern void ExecEvalFuncExprStrictFusage(ExprState *state, ExprEvalStep *op,
 										 ExprContext *econtext);
 extern void ExecEvalParamExec(ExprState *state, ExprEvalStep *op,
 							  ExprContext *econtext);
-extern void ExecEvalParamExecToast(ExprState *state, ExprEvalStep *op,
-								   ExprContext *econtext);
+extern void ExecEvalParamExecDetoast(ExprState *state, ExprEvalStep *op,
+									 ExprContext *econtext);
 extern void ExecEvalParamSet(ExprState *state, ExprEvalStep *op,
 							 ExprContext *econtext);
 extern void ExecEvalParamExtern(ExprState *state, ExprEvalStep *op,
@@ -920,10 +920,10 @@ extern void ExecEvalSubPlan(ExprState *state, ExprEvalStep *op,
 							ExprContext *econtext);
 extern void ExecEvalWholeRowVar(ExprState *state, ExprEvalStep *op,
 								ExprContext *econtext);
-extern void ExecEvalVarToast(ExprState *state, ExprEvalStep *op,
-							 ExprContext *econtext, TupleTableSlot *slot);
-extern void ExecEvalAssignVarToast(ExprState *state, ExprEvalStep *op,
-								   ExprContext *econtext, TupleTableSlot *slot);
+extern void ExecEvalVarDetoast(ExprState *state, ExprEvalStep *op,
+							   ExprContext *econtext, TupleTableSlot *slot);
+extern void ExecEvalAssignVarDetoast(ExprState *state, ExprEvalStep *op,
+									 ExprContext *econtext, TupleTableSlot *slot);
 extern void ExecEvalSysVar(ExprState *state, ExprEvalStep *op,
 						   ExprContext *econtext, TupleTableSlot *slot);
 

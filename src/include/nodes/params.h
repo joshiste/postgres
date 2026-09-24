@@ -151,8 +151,8 @@ typedef struct ParamExecData
 	/*
 	 * Where a detoasted copy of value may live: the slot and attribute number
 	 * of the Var the value was taken from, or NULL.  The copy is read (and
-	 * made) only by EEOP_PARAM_EXEC_TOAST, see ExecEvalParamExecToast; value
-	 * itself always stays the stored datum.
+	 * made) only by EEOP_PARAM_EXEC_DETOAST, see ExecEvalParamExecDetoast;
+	 * value itself always stays the stored datum.
 	 */
 	struct TupleTableSlot *detoast_slot;
 	int			detoast_attnum;

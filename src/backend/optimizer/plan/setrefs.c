@@ -137,7 +137,7 @@ static void add_rte_to_flat_rtable(PlannerGlobal *glob, List *rteperminfos,
 								   RangeTblEntry *rte);
 static Plan *set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset);
 static Index scan_tuple_varno(Plan *plan);
-static void set_plan_predetoast_attrs(Plan *plan);
+static void set_plan_detoast_reuse(Plan *plan);
 static Plan *set_indexonlyscan_references(PlannerInfo *root,
 										  IndexOnlyScan *plan,
 										  int rtoffset);
@@ -635,7 +635,7 @@ add_rte_to_flat_rtable(PlannerGlobal *glob, List *rteperminfos,
 }
 
 /* Detoast a toasted column once per row when several expressions reference it */
-bool		shared_detoast = true;
+bool		detoast_reuse = true;
 
 /*
  * toastable_type
@@ -708,7 +708,7 @@ expand_append_members(Plan *child, List *result)
 }
 
 /*
- * input_predetoast_attrs
+ * input_detoast_reuse_attrs
  *		The attributes of one input of a node that its expressions may detoast
  *		once per row: toastable attributes that two or more argument positions
  *		of the targetlist and quals read, or one when single_ref_ok (the outer
@@ -728,8 +728,8 @@ expand_append_members(Plan *child, List *result)
  * is never toasted and is skipped.
  */
 static Bitmapset *
-input_predetoast_attrs(List *tlist, List *quals, Index varno,
-					   bool single_ref_ok, Plan *child)
+input_detoast_reuse_attrs(List *tlist, List *quals, Index varno,
+						  bool single_ref_ok, Plan *child)
 {
 	Bitmapset  *multi;
 	List	   *vars = pull_detoast_vars(tlist, quals, varno, &multi);
@@ -784,8 +784,8 @@ input_predetoast_attrs(List *tlist, List *quals, Index varno,
 			if (!IsA(expr, Var) ||
 				!bms_is_member(((Var *) expr)->varattno, cseen))
 				continue;
-			member->predetoast_scanattrs =
-				bms_add_member(member->predetoast_scanattrs,
+			member->detoast_reuse_scan =
+				bms_add_member(member->detoast_reuse_scan,
 							   ((Var *) expr)->varattno);
 			attrs = bms_add_member(attrs, var->varattno);
 		}
@@ -801,42 +801,42 @@ input_predetoast_attrs(List *tlist, List *quals, Index varno,
 }
 
 /*
- * set_plan_predetoast_attrs
+ * set_plan_detoast_reuse
  *		Record, once a node and its children have their references fixed,
  *		which input attributes the executor may detoast once per row (see
- *		input_predetoast_attrs).  Nothing about the sets affects results:
+ *		input_detoast_reuse_attrs).  Nothing about the sets affects results:
  *		they only decide where the copy is worth making.
  */
 static void
-set_plan_predetoast_attrs(Plan *plan)
+set_plan_detoast_reuse(Plan *plan)
 {
-	if (!shared_detoast)
+	if (!detoast_reuse)
 		return;
 
 	if (IsScanPlan(plan))
-		plan->predetoast_scanattrs =
-			input_predetoast_attrs(plan->targetlist, plan->qual,
-								   scan_tuple_varno(plan), false, NULL);
+		plan->detoast_reuse_scan =
+			input_detoast_reuse_attrs(plan->targetlist, plan->qual,
+									  scan_tuple_varno(plan), false, NULL);
 	else if (IsA(plan, NestLoop) || IsA(plan, MergeJoin) || IsA(plan, HashJoin))
 	{
 		List	   *quals = join_side_quals((Join *) plan);
 
-		plan->predetoast_outerattrs =
-			input_predetoast_attrs(plan->targetlist, quals, OUTER_VAR, true,
-								   plan->lefttree);
-		plan->predetoast_innerattrs =
-			input_predetoast_attrs(plan->targetlist, quals, INNER_VAR, false,
-								   plan->righttree);
+		plan->detoast_reuse_outer =
+			input_detoast_reuse_attrs(plan->targetlist, quals, OUTER_VAR, true,
+									  plan->lefttree);
+		plan->detoast_reuse_inner =
+			input_detoast_reuse_attrs(plan->targetlist, quals, INNER_VAR, false,
+									  plan->righttree);
 		list_free(quals);
 	}
 	else if (IsA(plan, Agg))
-		plan->predetoast_outerattrs =
-			input_predetoast_attrs(plan->targetlist, plan->qual, OUTER_VAR,
-								   false, plan->lefttree);
+		plan->detoast_reuse_outer =
+			input_detoast_reuse_attrs(plan->targetlist, plan->qual, OUTER_VAR,
+									  false, plan->lefttree);
 	else if (IsA(plan, WindowAgg))
-		plan->predetoast_outerattrs =
-			input_predetoast_attrs(plan->targetlist, plan->qual, OUTER_VAR,
-								   false, NULL);
+		plan->detoast_reuse_outer =
+			input_detoast_reuse_attrs(plan->targetlist, plan->qual, OUTER_VAR,
+									  false, NULL);
 }
 
 /*
@@ -1570,7 +1570,7 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 	 * With the node's and its children's expressions final, record what the
 	 * executor may detoast once per row.
 	 */
-	set_plan_predetoast_attrs(plan);
+	set_plan_detoast_reuse(plan);
 
 	return plan;
 }
@@ -1645,7 +1645,7 @@ set_indexonlyscan_references(PlannerInfo *root,
 
 	pfree(index_itlist);
 
-	set_plan_predetoast_attrs((Plan *) plan);
+	set_plan_detoast_reuse((Plan *) plan);
 
 	return (Plan *) plan;
 }
@@ -1701,7 +1701,7 @@ set_subqueryscan_references(PlannerInfo *root,
 		plan->scan.plan.qual =
 			fix_scan_list(root, plan->scan.plan.qual,
 						  rtoffset, NUM_EXEC_QUAL((Plan *) plan));
-		set_plan_predetoast_attrs((Plan *) plan);
+		set_plan_detoast_reuse((Plan *) plan);
 
 		result = (Plan *) plan;
 	}

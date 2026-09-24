@@ -1036,7 +1036,6 @@ WHERE
    Output: hjtest_1.a, hjtest_2.a, (hjtest_1.tableoid)::regclass, (hjtest_2.tableoid)::regclass
    Hash Cond: ((hjtest_1.id = (SubPlan expr_1)) AND ((SubPlan expr_2) = (SubPlan expr_3)))
    Join Filter: (hjtest_1.a <> hjtest_2.b)
-   Pre-detoast Outer: hjtest_1.a
    ->  Seq Scan on public.hjtest_1
          Output: hjtest_1.a, hjtest_1.tableoid, hjtest_1.id, hjtest_1.b
          Filter: ((SubPlan expr_4) < 50)
@@ -1061,7 +1060,7 @@ WHERE
    SubPlan expr_2
      ->  Result
            Output: (hjtest_1.b * 5)
-(29 rows)
+(28 rows)
 
 SELECT hjtest_1.a a1, hjtest_2.a a2,hjtest_1.tableoid::regclass t1, hjtest_2.tableoid::regclass t2
 FROM hjtest_1, hjtest_2
@@ -1091,7 +1090,6 @@ WHERE
    Output: hjtest_1.a, hjtest_2.a, (hjtest_1.tableoid)::regclass, (hjtest_2.tableoid)::regclass
    Hash Cond: (((SubPlan expr_1) = hjtest_1.id) AND ((SubPlan expr_3) = (SubPlan expr_2)))
    Join Filter: (hjtest_1.a <> hjtest_2.b)
-   Pre-detoast Outer: hjtest_2.b
    ->  Seq Scan on public.hjtest_2
          Output: hjtest_2.a, hjtest_2.tableoid, hjtest_2.id, hjtest_2.c, hjtest_2.b
          Filter: ((SubPlan expr_5) < 55)
@@ -1116,7 +1114,7 @@ WHERE
    SubPlan expr_3
      ->  Result
            Output: (hjtest_2.c * 5)
-(29 rows)
+(28 rows)
 
 SELECT hjtest_1.a a1, hjtest_2.a a2,hjtest_1.tableoid::regclass t1, hjtest_2.tableoid::regclass t2
 FROM hjtest_2, hjtest_1

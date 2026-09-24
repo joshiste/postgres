@@ -1211,7 +1211,6 @@ select * from search_graph;
            ->  Merge Join
                  Output: g_1.f, g_1.t, g_1.label, CASE WHEN (ROW(g_1.f, g_1.t) = ANY (sg.path)) THEN true ELSE false END, array_cat(sg.path, ARRAY[ROW(g_1.f, g_1.t)])
                  Merge Cond: (g_1.f = sg.t)
-                 Pre-detoast Inner: sg.path
                  ->  Sort
                        Output: g_1.f, g_1.t, g_1.label
                        Sort Key: g_1.f
@@ -1223,7 +1222,7 @@ select * from search_graph;
                        ->  WorkTable Scan on search_graph sg
                              Output: sg.path, sg.t
                              Filter: (NOT sg.is_cycle)
-(21 rows)
+(20 rows)
 
 with recursive search_graph(f, t, label) as (
 	select * from graph g

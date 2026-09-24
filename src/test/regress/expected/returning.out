@@ -688,14 +688,13 @@ DELETE FROM foo WHERE f1 = 4 RETURNING old.*,new.*, *;
    Update on pg_temp.foo foo_2
    ->  Nested Loop
          Output: (foo_2.f2 || ' (deleted)'::text), '-1'::integer, '-1'::bigint, foo_1.ctid, foo_1.tableoid, foo_2.tableoid, foo_2.ctid
-         Pre-detoast Outer: foo_2.f2
          ->  Seq Scan on pg_temp.foo foo_2
                Output: foo_2.f2, foo_2.f1, foo_2.tableoid, foo_2.ctid
                Filter: (foo_2.f1 = 4)
          ->  Seq Scan on pg_temp.foo foo_1
                Output: foo_1.ctid, foo_1.f1, foo_1.tableoid
                Filter: (foo_1.f1 = 4)
-(12 rows)
+(11 rows)
 
 DELETE FROM foo WHERE f1 = 4 RETURNING old.*,new.*, *;
  f1 |     f2     | f3 | f4 | f1 |          f2          | f3 | f4 | f1 |          f2          | f3 | f4 
@@ -722,11 +721,9 @@ UPDATE joinview SET f3 = f3 + 1 WHERE f3 = 57
    ->  Hash Join
          Output: foo_2.f1, (foo_2.f3 + 1), joinme.ctid, foo_2.ctid, joinme_1.ctid, joinme.other, foo_1.tableoid, foo_1.ctid, foo_2.tableoid
          Hash Cond: (foo_1.f2 = joinme.f2j)
-         Pre-detoast Outer: foo_1.f2
          ->  Hash Join
                Output: foo_1.f2, foo_1.tableoid, foo_1.ctid, joinme_1.ctid, joinme_1.f2j
                Hash Cond: (joinme_1.f2j = foo_1.f2)
-               Pre-detoast Outer: joinme_1.f2j
                ->  Seq Scan on pg_temp.joinme joinme_1
                      Output: joinme_1.ctid, joinme_1.f2j
                ->  Hash
@@ -738,7 +735,6 @@ UPDATE joinview SET f3 = f3 + 1 WHERE f3 = 57
                ->  Hash Join
                      Output: joinme.ctid, joinme.other, joinme.f2j, foo_2.f1, foo_2.f3, foo_2.ctid, foo_2.f2, foo_2.tableoid
                      Hash Cond: (joinme.f2j = foo_2.f2)
-                     Pre-detoast Outer: joinme.f2j
                      ->  Seq Scan on pg_temp.joinme
                            Output: joinme.ctid, joinme.other, joinme.f2j
                      ->  Hash
@@ -746,7 +742,7 @@ UPDATE joinview SET f3 = f3 + 1 WHERE f3 = 57
                            ->  Seq Scan on pg_temp.foo foo_2
                                  Output: foo_2.f1, foo_2.f3, foo_2.ctid, foo_2.f2, foo_2.tableoid
                                  Filter: (foo_2.f3 = 57)
-(30 rows)
+(27 rows)
 
 UPDATE joinview SET f3 = f3 + 1 WHERE f3 = 57
   RETURNING old.*, new.*, *, new.f3 - old.f3 AS delta_f3;
@@ -802,7 +798,6 @@ UPDATE joinview SET f3 = f3 + 1, f4 = 7 WHERE f3 = 58
    ->  Hash Join
          Output: (foo.f3 + 1), '7'::bigint, ROW(foo.f1, foo.f2, foo.f3, foo.f4, joinme.other), foo.ctid, joinme.ctid, foo.tableoid
          Hash Cond: (joinme.f2j = foo.f2)
-         Pre-detoast Outer: joinme.f2j
          ->  Seq Scan on pg_temp.joinme
                Output: joinme.other, joinme.ctid, joinme.f2j
          ->  Hash
@@ -810,7 +805,7 @@ UPDATE joinview SET f3 = f3 + 1, f4 = 7 WHERE f3 = 58
                ->  Seq Scan on pg_temp.foo
                      Output: foo.f3, foo.f1, foo.f2, foo.f4, foo.ctid, foo.tableoid
                      Filter: (foo.f3 = 58)
-(13 rows)
+(12 rows)
 
 UPDATE joinview SET f3 = f3 + 1, f4 = 7 WHERE f3 = 58
   RETURNING old.*, new.*, *, new.f3 - old.f3 AS delta_f3;  -- should succeed

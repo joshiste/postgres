@@ -6120,7 +6120,6 @@ select t1.* from
    ->  Nested Loop Left Join
          Output: t1.f1, i8.q2
          Join Filter: (t1.f1 = '***'::text)
-         Pre-detoast Outer: t1.f1
          ->  Seq Scan on public.text_tbl t1
                Output: t1.f1
          ->  Materialize
@@ -6145,7 +6144,7 @@ select t1.* from
          Output: i4.f1
          ->  Seq Scan on public.int4_tbl i4
                Output: i4.f1
-(31 rows)
+(30 rows)
 
 select t1.* from
   text_tbl t1
@@ -6182,7 +6181,6 @@ select t1.* from
    ->  Nested Loop Left Join
          Output: t1.f1, i8.q2
          Join Filter: (t1.f1 = '***'::text)
-         Pre-detoast Outer: t1.f1
          ->  Seq Scan on public.text_tbl t1
                Output: t1.f1
          ->  Materialize
@@ -6211,7 +6209,7 @@ select t1.* from
          Output: i4.f1
          ->  Seq Scan on public.int4_tbl i4
                Output: i4.f1
-(35 rows)
+(34 rows)
 
 select t1.* from
   text_tbl t1
@@ -6249,7 +6247,6 @@ select t1.* from
    ->  Nested Loop Left Join
          Output: t1.f1, i8.q2
          Join Filter: (t1.f1 = '***'::text)
-         Pre-detoast Outer: t1.f1
          ->  Seq Scan on public.text_tbl t1
                Output: t1.f1
          ->  Materialize
@@ -6281,7 +6278,7 @@ select t1.* from
          Output: i4.f1
          ->  Seq Scan on public.int4_tbl i4
                Output: i4.f1
-(38 rows)
+(37 rows)
 
 select t1.* from
   text_tbl t1
@@ -6410,7 +6407,6 @@ where t1.f1 = ss.f1;
  Nested Loop
    Output: t1.f1, i8.q1, i8.q2, (i8.q1), t2.f1
    Join Filter: (t1.f1 = t2.f1)
-   Pre-detoast Outer: t1.f1
    ->  Nested Loop Left Join
          Output: t1.f1, i8.q1, i8.q2
          ->  Seq Scan on public.text_tbl t1
@@ -6428,7 +6424,7 @@ where t1.f1 = ss.f1;
                Output: (i8.q1), t2.f1
                ->  Seq Scan on public.text_tbl t2
                      Output: i8.q1, t2.f1
-(21 rows)
+(20 rows)
 
 select * from
   text_tbl t1
@@ -6454,7 +6450,6 @@ where t1.f1 = ss2.f1;
  Nested Loop
    Output: t1.f1, i8.q1, i8.q2, (i8.q1), t2.f1, ((i8.q1)), (t2.f1)
    Join Filter: (t1.f1 = (t2.f1))
-   Pre-detoast Outer: t1.f1
    ->  Nested Loop
          Output: t1.f1, i8.q1, i8.q2, (i8.q1), t2.f1
          ->  Nested Loop Left Join
@@ -6482,7 +6477,7 @@ where t1.f1 = ss2.f1;
                Output: ((i8.q1)), (t2.f1)
                ->  Seq Scan on public.text_tbl t3
                      Output: (i8.q1), t2.f1
-(31 rows)
+(30 rows)
 
 select * from
   text_tbl t1

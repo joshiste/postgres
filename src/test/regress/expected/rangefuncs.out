@@ -2471,14 +2471,13 @@ select * from
 --------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: jsonb_path_query_array((unnested_modules.module -> 'lectures'::text), '$[*]'::jsonpath, '{}'::jsonb, false), j.id
-   Pre-detoast Outer: unnested_modules.module
    ->  Function Scan on pg_catalog.unnest unnested_modules
          Output: unnested_modules.module
          Function Call: unnest('{"{\"lectures\": [{\"id\": \"1\"}]}"}'::jsonb[])
    ->  Function Scan on pg_catalog.jsonb_to_recordset j
          Output: j.id
          Function Call: jsonb_to_recordset(jsonb_path_query_array((unnested_modules.module -> 'lectures'::text), '$[*]'::jsonpath, '{}'::jsonb, false))
-(9 rows)
+(8 rows)
 
 select * from
   (select jsonb_path_query_array(module->'lectures', '$[*]') as lecture

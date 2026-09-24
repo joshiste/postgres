@@ -1285,8 +1285,7 @@ WHERE c1 = 642 AND length(to_tsvector('custom_search'::regconfig, c3)) > 0;
    Output: c1, to_tsvector('custom_search'::regconfig, c3)
    Filter: (length(to_tsvector('custom_search'::regconfig, ft1.c3)) > 0)
    Remote SQL: SELECT "C 1", c3 FROM "S 1"."T 1" WHERE (("C 1" = 642))
-   Pre-detoast: ft1.c3
-(5 rows)
+(4 rows)
 
 SELECT c1, to_tsvector('custom_search'::regconfig, c3) FROM ft1
 WHERE c1 = 642 AND length(to_tsvector('custom_search'::regconfig, c3)) > 0;
@@ -2751,7 +2750,6 @@ SELECT * FROM local_tbl LEFT JOIN (SELECT ft1.*, COALESCE(ft1.c3 || ft2.c3, 'foo
                                  ->  Hash Join
                                        Output: ft1.c1, ft1.c2, ft1.c3, ft1.c4, ft1.c5, ft1.c6, ft1.c7, ft1.c8, ft1.*, ft2.*, COALESCE((ft1.c3 || ft2.c3), 'foobar'::text), ft2.c3
                                        Hash Cond: (ft1.c1 = ft2.c1)
-                                       Pre-detoast Outer: ft1.c3
                                        ->  Foreign Scan on public.ft1
                                              Output: ft1.c1, ft1.c2, ft1.c3, ft1.c4, ft1.c5, ft1.c6, ft1.c7, ft1.c8, ft1.*
                                              Remote SQL: SELECT "C 1", c2, c3, c4, c5, c6, c7, c8 FROM "S 1"."T 1" WHERE (("C 1" < 100))
@@ -2760,7 +2758,7 @@ SELECT * FROM local_tbl LEFT JOIN (SELECT ft1.*, COALESCE(ft1.c3 || ft2.c3, 'foo
                                              ->  Foreign Scan on public.ft2
                                                    Output: ft2.*, ft2.c1, ft2.c3
                                                    Remote SQL: SELECT "C 1", c2, c3, c4, c5, c6, c7, c8 FROM "S 1"."T 1"
-(30 rows)
+(29 rows)
 
 ALTER SERVER loopback OPTIONS (DROP extensions);
 ALTER SERVER loopback OPTIONS (ADD fdw_startup_cost '10000.0');
@@ -2773,7 +2771,6 @@ SELECT * FROM local_tbl LEFT JOIN (SELECT ft1.* FROM ft1 INNER JOIN ft2 ON (ft1.
    ->  Nested Loop Left Join
          Output: local_tbl.c1, local_tbl.c2, local_tbl.c3, ft1.c1, ft1.c2, ft1.c3, ft1.c4, ft1.c5, ft1.c6, ft1.c7, ft1.c8, local_tbl.ctid, ft1.*, ft2.*
          Join Filter: (local_tbl.c3 = ft1.c3)
-         Pre-detoast Outer: local_tbl.c3
          ->  Index Scan using local_tbl_pkey on public.local_tbl
                Output: local_tbl.c1, local_tbl.c2, local_tbl.c3, local_tbl.ctid
          ->  Materialize
@@ -2801,7 +2798,7 @@ SELECT * FROM local_tbl LEFT JOIN (SELECT ft1.* FROM ft1 INNER JOIN ft2 ON (ft1.
                                        ->  Foreign Scan on public.ft2
                                              Output: ft2.*, ft2.c1, ft2.c2
                                              Remote SQL: SELECT "C 1", c2, c3, c4, c5, c6, c7, c8 FROM "S 1"."T 1" ORDER BY "C 1" ASC NULLS LAST
-(33 rows)
+(32 rows)
 
 ALTER SERVER loopback OPTIONS (DROP fdw_startup_cost);
 ALTER SERVER loopback OPTIONS (ADD extensions 'postgres_fdw');
@@ -3857,8 +3854,7 @@ select count(*) from (select c5, count(c1) from ft1 group by c5, sqrt(c2) having
          Filter: (((((avg(ft1.c1)) / (avg(ft1.c1))))::double precision * random()) <= '1'::double precision)
          Relations: Aggregate on (public.ft1)
          Remote SQL: SELECT c5, NULL::bigint, sqrt(c2), avg("C 1") FROM "S 1"."T 1" GROUP BY 1, 3 HAVING ((avg("C 1") < 500::numeric))
-         Pre-detoast: (avg(ft1.c1))
-(8 rows)
+(7 rows)
 
 select count(*) from (select c5, count(c1) from ft1 group by c5, sqrt(c2) having (avg(c1) / avg(c1)) * random() <= 1 and avg(c1) < 500) x;
  count 
@@ -4903,7 +4899,6 @@ EXPLAIN (VERBOSE, COSTS OFF) EXECUTE st2(10, 20);
  Nested Loop Semi Join
    Output: t1.c1, t1.c2, t1.c3, t1.c4, t1.c5, t1.c6, t1.c7, t1.c8
    Join Filter: (t2.c3 = t1.c3)
-   Pre-detoast Outer: t1.c3
    ->  Foreign Scan on public.ft1 t1
          Output: t1.c1, t1.c2, t1.c3, t1.c4, t1.c5, t1.c6, t1.c7, t1.c8
          Remote SQL: SELECT "C 1", c2, c3, c4, c5, c6, c7, c8 FROM "S 1"."T 1" WHERE (("C 1" < 20)) ORDER BY "C 1" ASC NULLS LAST
@@ -4913,7 +4908,7 @@ EXPLAIN (VERBOSE, COSTS OFF) EXECUTE st2(10, 20);
                Output: t2.c3
                Filter: (date(t2.c4) = '01-17-1970'::date)
                Remote SQL: SELECT c3, c4 FROM "S 1"."T 1" WHERE (("C 1" > 10))
-(13 rows)
+(12 rows)
 
 EXECUTE st2(10, 20);
  c1 | c2 |  c3   |              c4              |            c5            | c6 |     c7     | c8  
@@ -5474,7 +5469,6 @@ explain (verbose, costs off) select * from ft3 f, loct3 l
    Output: f.f1, f.f2, f.f3, l.f1, l.f2, l.f3
    Inner Unique: true
    Hash Cond: ((f.f3)::text = (l.f3)::text)
-   Pre-detoast Outer: f.f3
    ->  Foreign Scan on public.ft3 f
          Output: f.f1, f.f2, f.f3
          Remote SQL: SELECT f1, f2, f3 FROM public.loct3
@@ -5483,7 +5477,7 @@ explain (verbose, costs off) select * from ft3 f, loct3 l
          ->  Index Scan using loct3_f1_key on public.loct3 l
                Output: l.f1, l.f2, l.f3
                Index Cond: (l.f1 = 'foo'::text)
-(13 rows)
+(12 rows)
 
 -- ===================================================================
 -- test SEMI-JOIN pushdown
@@ -5815,8 +5809,7 @@ INSERT INTO ft2 (c1,c2,c3) SELECT c1+1000,c2+100, c3 || c3 FROM ft2 LIMIT 20;
          ->  Foreign Scan on public.ft2 ft2_1
                Output: (ft2_1.c1 + 1000), (ft2_1.c2 + 100), (ft2_1.c3 || ft2_1.c3)
                Remote SQL: SELECT "C 1", c2, c3 FROM "S 1"."T 1" LIMIT 20::bigint
-               Pre-detoast: ft2_1.c3
-(9 rows)
+(8 rows)
 
 INSERT INTO ft2 (c1,c2,c3) SELECT c1+1000,c2+100, c3 || c3 FROM ft2 LIMIT 20;
 INSERT INTO ft2 (c1,c2,c3)
@@ -7841,13 +7834,12 @@ UPDATE remt2 SET c2 = remt2.c2 || remt2.c2 FROM loct1 WHERE loct1.c1 = remt2.c1 
    ->  Nested Loop
          Output: (remt2.c2 || remt2.c2), remt2.ctid, remt2.*, loct1.ctid
          Join Filter: (remt2.c1 = loct1.c1)
-         Pre-detoast Inner: remt2.c2
          ->  Seq Scan on public.loct1
                Output: loct1.ctid, loct1.c1
          ->  Foreign Scan on public.remt2
                Output: remt2.c2, remt2.ctid, remt2.*, remt2.c1
                Remote SQL: SELECT c1, c2, ctid FROM public.loct2 FOR UPDATE
-(12 rows)
+(11 rows)
 
 UPDATE remt2 SET c2 = remt2.c2 || remt2.c2 FROM loct1 WHERE loct1.c1 = remt2.c1 RETURNING remt2.*;
   c1  |   c2   
@@ -9817,7 +9809,6 @@ update parent set b = parent.b || remt2.b from remt2 where parent.a = remt2.a re
    ->  Nested Loop
          Output: (parent.b || remt2.b), remt2.*, remt2.a, remt2.b, parent.tableoid, parent.ctid, (NULL::record)
          Join Filter: (parent.a = remt2.a)
-         Pre-detoast Outer: parent.b
          ->  Append
                ->  Seq Scan on public.parent parent_1
                      Output: parent_1.b, parent_1.a, parent_1.tableoid, parent_1.ctid, NULL::record
@@ -9829,7 +9820,7 @@ update parent set b = parent.b || remt2.b from remt2 where parent.a = remt2.a re
                ->  Foreign Scan on public.remt2
                      Output: remt2.b, remt2.*, remt2.a
                      Remote SQL: SELECT a, b FROM public.loct2
-(20 rows)
+(19 rows)
 
 update parent set b = parent.b || remt2.b from remt2 where parent.a = remt2.a returning *;
  a |   b    | a |  b  
@@ -12580,7 +12571,6 @@ INSERT INTO join_tbl SELECT t1.a, t1.b, 'AAA' || t1.c, t2.a, t2.b, 'AAA' || t2.c
          ->  Hash Join
                Output: t1_3.a, t1_3.b, ('AAA'::text || t1_3.c), t2_3.a, t2_3.b, ('AAA'::text || t2_3.c)
                Hash Cond: ((t2_3.a = t1_3.a) AND (t2_3.b = t1_3.b))
-               Pre-detoast Outer: t2_3.c
                ->  Seq Scan on public.async_p3 t2_3
                      Output: t2_3.a, t2_3.b, t2_3.c
                ->  Hash
@@ -12588,7 +12578,7 @@ INSERT INTO join_tbl SELECT t1.a, t1.b, 'AAA' || t1.c, t2.a, t2.b, 'AAA' || t2.c
                      ->  Seq Scan on public.async_p3 t1_3
                            Output: t1_3.a, t1_3.b, t1_3.c
                            Filter: ((t1_3.b % 100) = 0)
-(21 rows)
+(20 rows)
 
 INSERT INTO join_tbl SELECT t1.a, t1.b, 'AAA' || t1.c, t2.a, t2.b, 'AAA' || t2.c FROM async_pt t1, async_pt t2 WHERE t1.a = t2.a AND t1.b = t2.b AND t1.b % 100 = 0;
 SELECT * FROM join_tbl ORDER BY a1;
@@ -13131,7 +13121,6 @@ INSERT INTO join_tbl SELECT * FROM async_pt LEFT JOIN t ON (async_pt.a = t.a AND
            Output: remote_tbl.a, remote_tbl.b, remote_tbl.c
            ->  Foreign Update on public.remote_tbl
                  Remote SQL: UPDATE public.base_tbl3 SET c = (c || c) RETURNING a, b, c
-                 Pre-detoast: remote_tbl.c
    ->  Nested Loop Left Join
          Output: async_pt.a, async_pt.b, async_pt.c, t.a, t.b, t.c
          Join Filter: ((async_pt.a = t.a) AND (async_pt.b = t.b))
@@ -13149,7 +13138,7 @@ INSERT INTO join_tbl SELECT * FROM async_pt LEFT JOIN t ON (async_pt.a = t.a AND
                      Filter: (async_pt_3.b === 505)
          ->  CTE Scan on t
                Output: t.a, t.b, t.c
-(24 rows)
+(23 rows)
 
 WITH t AS (UPDATE remote_tbl SET c = c || c RETURNING *)
 INSERT INTO join_tbl SELECT * FROM async_pt LEFT JOIN t ON (async_pt.a = t.a AND async_pt.b = t.b) WHERE async_pt.b === 505;
@@ -13182,15 +13171,12 @@ UPDATE async_pt SET c = c || c WHERE b = 0 RETURNING *;
    ->  Append
          ->  Foreign Update on public.async_p1 async_pt_1
                Remote SQL: UPDATE public.base_tbl1 SET c = (c || c) WHERE ((b = 0)) RETURNING a, b, c
-               Pre-detoast: async_pt_1.c
          ->  Foreign Update on public.async_p2 async_pt_2
                Remote SQL: UPDATE public.base_tbl2 SET c = (c || c) WHERE ((b = 0)) RETURNING a, b, c
-               Pre-detoast: async_pt_2.c
          ->  Seq Scan on public.async_p3 async_pt_3
                Output: (async_pt_3.c || async_pt_3.c), async_pt_3.tableoid, async_pt_3.ctid, NULL::record
                Filter: (async_pt_3.b = 0)
-               Pre-detoast: async_pt_3.c
-(16 rows)
+(13 rows)
 
 UPDATE async_pt SET c = c || c WHERE b = 0 RETURNING *;
   a   | b |    c     

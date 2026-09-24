@@ -61,9 +61,9 @@ SUBDIRS = \
 
 
 ifeq ($(enable_injection_points),yes)
-SUBDIRS += injection_points gin nbtree test_shared_detoast typcache
+SUBDIRS += injection_points detoast_reuse gin nbtree typcache
 else
-ALWAYS_SUBDIRS += injection_points gin nbtree test_shared_detoast typcache
+ALWAYS_SUBDIRS += injection_points detoast_reuse gin nbtree typcache
 endif
 
 ifeq ($(with_ssl),openssl)

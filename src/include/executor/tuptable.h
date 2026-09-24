@@ -493,8 +493,8 @@ slot_is_current_xact_tuple(TupleTableSlot *slot)
 }
 
 /*
- * Release the detoasted copies made by EEOP_*_VAR_TOAST steps or carried in
- * by EEOP_ASSIGN_*_VAR_TOAST.  A slot implementation calls this whenever the
+ * Release the detoasted copies made by EEOP_*_VAR_DETOAST steps or carried in
+ * by EEOP_ASSIGN_*_VAR_DETOAST.  A slot implementation calls this whenever the
  * slot's tts_values are about to be invalidated, before any pointer into that
  * memory could be looked at again; see resets_detoasted above.
  */

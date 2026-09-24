@@ -90,7 +90,7 @@ typedef struct PlannedStmt
 	 * a subplan or a nestloop inner plan receives, whose copy was made
 	 * elsewhere (see ExecInitDetoastArg).
 	 */
-	bool		predetoastEnabled;
+	bool		detoastReuse;
 
 	/* redo plan when TransactionXmin changes? */
 	bool		transientPlan;
@@ -238,13 +238,13 @@ typedef struct Plan
 	/*
 	 * Attributes of the scan tuple, the outer input and the inner input that
 	 * this node's expressions may detoast once per row, keeping the copy
-	 * beside the slot (see set_plan_predetoast_attrs in setrefs.c).  The
-	 * executor compiles argument positions reading them to EEOP_*_VAR_TOAST
+	 * beside the slot (see set_plan_detoast_reuse in setrefs.c).  The
+	 * executor compiles argument positions reading them to EEOP_*_VAR_DETOAST
 	 * steps.
 	 */
-	Bitmapset  *predetoast_scanattrs;
-	Bitmapset  *predetoast_outerattrs;
-	Bitmapset  *predetoast_innerattrs;
+	Bitmapset  *detoast_reuse_scan;
+	Bitmapset  *detoast_reuse_outer;
+	Bitmapset  *detoast_reuse_inner;
 
 	/*
 	 * Common structural data for all Plan types.

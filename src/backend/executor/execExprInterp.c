@@ -459,14 +459,14 @@ ExecReadyInterpretedExpr(ExprState *state)
 
 
 /*
- * Inline part of the EEOP_*_VAR_TOAST steps.  Values that are neither
+ * Inline part of the EEOP_*_VAR_DETOAST steps.  Values that are neither
  * compressed nor stored out of line, the common case for short strings, are
  * handed out as they are without leaving the interpreter loop; the others go
- * to ExecEvalVarToast for the copy.
+ * to ExecEvalVarDetoast for the copy.
  */
 static inline void
-ExecEvalVarToastInline(ExprState *state, ExprEvalStep *op,
-					   ExprContext *econtext, TupleTableSlot *slot)
+ExecEvalVarDetoastInline(ExprState *state, ExprEvalStep *op,
+						 ExprContext *econtext, TupleTableSlot *slot)
 {
 	int			attnum = op->d.var.attnum;
 	Datum		value = slot->tts_values[attnum];
@@ -475,7 +475,7 @@ ExecEvalVarToastInline(ExprState *state, ExprEvalStep *op,
 	if (!slot->tts_isnull[attnum] &&
 		(VARATT_IS_COMPRESSED(DatumGetPointer(value)) ||
 		 VARATT_IS_EXTERNAL(DatumGetPointer(value))))
-		ExecEvalVarToast(state, op, econtext, slot);
+		ExecEvalVarDetoast(state, op, econtext, slot);
 	else
 	{
 		*op->resvalue = value;
@@ -520,9 +520,9 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		&&CASE_EEOP_SCAN_VAR,
 		&&CASE_EEOP_OLD_VAR,
 		&&CASE_EEOP_NEW_VAR,
-		&&CASE_EEOP_INNER_VAR_TOAST,
-		&&CASE_EEOP_OUTER_VAR_TOAST,
-		&&CASE_EEOP_SCAN_VAR_TOAST,
+		&&CASE_EEOP_INNER_VAR_DETOAST,
+		&&CASE_EEOP_OUTER_VAR_DETOAST,
+		&&CASE_EEOP_SCAN_VAR_DETOAST,
 		&&CASE_EEOP_INNER_SYSVAR,
 		&&CASE_EEOP_OUTER_SYSVAR,
 		&&CASE_EEOP_SCAN_SYSVAR,
@@ -534,9 +534,9 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		&&CASE_EEOP_ASSIGN_SCAN_VAR,
 		&&CASE_EEOP_ASSIGN_OLD_VAR,
 		&&CASE_EEOP_ASSIGN_NEW_VAR,
-		&&CASE_EEOP_ASSIGN_INNER_VAR_TOAST,
-		&&CASE_EEOP_ASSIGN_OUTER_VAR_TOAST,
-		&&CASE_EEOP_ASSIGN_SCAN_VAR_TOAST,
+		&&CASE_EEOP_ASSIGN_INNER_VAR_DETOAST,
+		&&CASE_EEOP_ASSIGN_OUTER_VAR_DETOAST,
+		&&CASE_EEOP_ASSIGN_SCAN_VAR_DETOAST,
 		&&CASE_EEOP_ASSIGN_TMP,
 		&&CASE_EEOP_ASSIGN_TMP_MAKE_RO,
 		&&CASE_EEOP_CONST,
@@ -567,7 +567,7 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		&&CASE_EEOP_BOOLTEST_IS_FALSE,
 		&&CASE_EEOP_BOOLTEST_IS_NOT_FALSE,
 		&&CASE_EEOP_PARAM_EXEC,
-		&&CASE_EEOP_PARAM_EXEC_TOAST,
+		&&CASE_EEOP_PARAM_EXEC_DETOAST,
 		&&CASE_EEOP_PARAM_EXTERN,
 		&&CASE_EEOP_PARAM_CALLBACK,
 		&&CASE_EEOP_PARAM_SET,
@@ -762,23 +762,23 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			EEO_NEXT();
 		}
 
-		EEO_CASE(EEOP_INNER_VAR_TOAST)
+		EEO_CASE(EEOP_INNER_VAR_DETOAST)
 		{
-			ExecEvalVarToastInline(state, op, econtext, innerslot);
+			ExecEvalVarDetoastInline(state, op, econtext, innerslot);
 
 			EEO_NEXT();
 		}
 
-		EEO_CASE(EEOP_OUTER_VAR_TOAST)
+		EEO_CASE(EEOP_OUTER_VAR_DETOAST)
 		{
-			ExecEvalVarToastInline(state, op, econtext, outerslot);
+			ExecEvalVarDetoastInline(state, op, econtext, outerslot);
 
 			EEO_NEXT();
 		}
 
-		EEO_CASE(EEOP_SCAN_VAR_TOAST)
+		EEO_CASE(EEOP_SCAN_VAR_DETOAST)
 		{
-			ExecEvalVarToastInline(state, op, econtext, scanslot);
+			ExecEvalVarDetoastInline(state, op, econtext, scanslot);
 
 			EEO_NEXT();
 		}
@@ -898,21 +898,21 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			EEO_NEXT();
 		}
 
-		EEO_CASE(EEOP_ASSIGN_INNER_VAR_TOAST)
+		EEO_CASE(EEOP_ASSIGN_INNER_VAR_DETOAST)
 		{
-			ExecEvalAssignVarToast(state, op, econtext, innerslot);
+			ExecEvalAssignVarDetoast(state, op, econtext, innerslot);
 			EEO_NEXT();
 		}
 
-		EEO_CASE(EEOP_ASSIGN_OUTER_VAR_TOAST)
+		EEO_CASE(EEOP_ASSIGN_OUTER_VAR_DETOAST)
 		{
-			ExecEvalAssignVarToast(state, op, econtext, outerslot);
+			ExecEvalAssignVarDetoast(state, op, econtext, outerslot);
 			EEO_NEXT();
 		}
 
-		EEO_CASE(EEOP_ASSIGN_SCAN_VAR_TOAST)
+		EEO_CASE(EEOP_ASSIGN_SCAN_VAR_DETOAST)
 		{
-			ExecEvalAssignVarToast(state, op, econtext, scanslot);
+			ExecEvalAssignVarDetoast(state, op, econtext, scanslot);
 			EEO_NEXT();
 		}
 
@@ -1398,9 +1398,9 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			EEO_NEXT();
 		}
 
-		EEO_CASE(EEOP_PARAM_EXEC_TOAST)
+		EEO_CASE(EEOP_PARAM_EXEC_DETOAST)
 		{
-			ExecEvalParamExecToast(state, op, econtext);
+			ExecEvalParamExecDetoast(state, op, econtext);
 
 			EEO_NEXT();
 		}
@@ -5796,8 +5796,8 @@ slot_detoast_attr(TupleTableSlot *slot, int attnum, varlena *attr)
  * step, so every other reader of the slot keeps seeing the stored datum.
  */
 void
-ExecEvalVarToast(ExprState *state, ExprEvalStep *op, ExprContext *econtext,
-				 TupleTableSlot *slot)
+ExecEvalVarDetoast(ExprState *state, ExprEvalStep *op, ExprContext *econtext,
+				   TupleTableSlot *slot)
 {
 	int			attnum = op->d.var.attnum;
 	Datum		value = slot->tts_values[attnum];
@@ -5826,8 +5826,8 @@ ExecEvalVarToast(ExprState *state, ExprEvalStep *op, ExprContext *econtext,
  * stale reference can at worst miss the copy.
  */
 void
-ExecEvalParamExecToast(ExprState *state, ExprEvalStep *op,
-					   ExprContext *econtext)
+ExecEvalParamExecDetoast(ExprState *state, ExprEvalStep *op,
+						 ExprContext *econtext)
 {
 	ParamExecData *prm = &(econtext->ecxt_param_exec_vals[op->d.param.paramid]);
 	TupleTableSlot *slot;
@@ -5859,8 +5859,8 @@ ExecEvalParamExecToast(ExprState *state, ExprEvalStep *op,
  * every projection and when it is materialized.
  */
 void
-ExecEvalAssignVarToast(ExprState *state, ExprEvalStep *op,
-					   ExprContext *econtext, TupleTableSlot *slot)
+ExecEvalAssignVarDetoast(ExprState *state, ExprEvalStep *op,
+						 ExprContext *econtext, TupleTableSlot *slot)
 {
 	TupleTableSlot *resultslot = state->resultslot;
 	int			resultnum = op->d.assign_var.resultnum;

@@ -186,8 +186,8 @@ tts_virtual_materialize(TupleTableSlot *slot)
 
 	/*
 	 * Detoasted copies carried in from another slot (see
-	 * ExecEvalAssignVarToast) point into that slot, which a materialized slot
-	 * may outlive.  Drop them along with the slot's own copies; they are
+	 * ExecEvalAssignVarDetoast) point into that slot, which a materialized
+	 * slot may outlive.  Drop them along with the slot's own copies; they are
 	 * recreated on demand.
 	 */
 	ExecSlotResetDetoast(slot);

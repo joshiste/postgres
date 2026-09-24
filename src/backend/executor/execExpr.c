@@ -139,11 +139,11 @@ ExecInitDetoastArg(Expr *arg, ExprState *state, Datum *resv, bool *resnull)
 	while (IsA(expr, RelabelType))
 		expr = ((RelabelType *) expr)->arg;
 	if (!((IsA(expr, Param) && ((Param *) expr)->paramkind == PARAM_EXEC &&
-		   pstmt != NULL && pstmt->predetoastEnabled) ||
+		   pstmt != NULL && pstmt->detoastReuse) ||
 		  (IsA(expr, Var) && plan != NULL &&
-		   (plan->predetoast_scanattrs != NULL ||
-			plan->predetoast_outerattrs != NULL ||
-			plan->predetoast_innerattrs != NULL))) ||
+		   (plan->detoast_reuse_scan != NULL ||
+			plan->detoast_reuse_outer != NULL ||
+			plan->detoast_reuse_inner != NULL))) ||
 		!ExecPushDetoastArgStep(expr, state, resv, resnull))
 		ExecInitExprRec(arg, state, resv, resnull);
 }
@@ -532,8 +532,8 @@ ExecBuildProjectionInfo(List *targetList,
 				case INNER_VAR:
 					/* get the tuple from the inner node */
 					if (parent && bms_is_member(attnum,
-												parent->plan->predetoast_innerattrs))
-						scratch.opcode = EEOP_ASSIGN_INNER_VAR_TOAST;
+												parent->plan->detoast_reuse_inner))
+						scratch.opcode = EEOP_ASSIGN_INNER_VAR_DETOAST;
 					else
 						scratch.opcode = EEOP_ASSIGN_INNER_VAR;
 					break;
@@ -541,8 +541,8 @@ ExecBuildProjectionInfo(List *targetList,
 				case OUTER_VAR:
 					/* get the tuple from the outer node */
 					if (parent && bms_is_member(attnum,
-												parent->plan->predetoast_outerattrs))
-						scratch.opcode = EEOP_ASSIGN_OUTER_VAR_TOAST;
+												parent->plan->detoast_reuse_outer))
+						scratch.opcode = EEOP_ASSIGN_OUTER_VAR_DETOAST;
 					else
 						scratch.opcode = EEOP_ASSIGN_OUTER_VAR;
 					break;
@@ -559,8 +559,8 @@ ExecBuildProjectionInfo(List *targetList,
 					{
 						case VAR_RETURNING_DEFAULT:
 							if (parent && bms_is_member(attnum,
-														parent->plan->predetoast_scanattrs))
-								scratch.opcode = EEOP_ASSIGN_SCAN_VAR_TOAST;
+														parent->plan->detoast_reuse_scan))
+								scratch.opcode = EEOP_ASSIGN_SCAN_VAR_DETOAST;
 							else
 								scratch.opcode = EEOP_ASSIGN_SCAN_VAR;
 							break;
@@ -2820,8 +2820,8 @@ ExecFuncReadsStoredForm(Oid funcid)
  * Out-of-line part of ExecInitDetoastArg: push the step that hands out the
  * detoasted copy if the argument qualifies, and say whether it did.  A plain
  * Var of an attribute the node detoasts once per row becomes the
- * corresponding EEOP_*_VAR_TOAST step; a varlena PARAM_EXEC parameter becomes
- * EEOP_PARAM_EXEC_TOAST, which does the same for a parameter set from a slot
+ * corresponding EEOP_*_VAR_DETOAST step; a varlena PARAM_EXEC parameter becomes
+ * EEOP_PARAM_EXEC_DETOAST, which does the same for a parameter set from a slot
  * column.  Everything else, and every Var or Param in any other position,
  * goes through ExecInitExprRec and sees the stored datum.  Restricting the
  * steps to argument positions is what keeps a detoasted copy from ever
@@ -2841,7 +2841,7 @@ ExecPushDetoastArgStep(Expr *expr, ExprState *state, Datum *resv, bool *resnull)
 		if (param->paramkind != PARAM_EXEC ||
 			get_typlen(param->paramtype) != -1)
 			return false;
-		scratch.opcode = EEOP_PARAM_EXEC_TOAST;
+		scratch.opcode = EEOP_PARAM_EXEC_DETOAST;
 		scratch.d.param.paramid = param->paramid;
 		scratch.d.param.paramtype = param->paramtype;
 	}
@@ -2856,16 +2856,16 @@ ExecPushDetoastArgStep(Expr *expr, ExprState *state, Datum *resv, bool *resnull)
 		switch (var->varno)
 		{
 			case INNER_VAR:
-				attrs = plan->predetoast_innerattrs;
-				scratch.opcode = EEOP_INNER_VAR_TOAST;
+				attrs = plan->detoast_reuse_inner;
+				scratch.opcode = EEOP_INNER_VAR_DETOAST;
 				break;
 			case OUTER_VAR:
-				attrs = plan->predetoast_outerattrs;
-				scratch.opcode = EEOP_OUTER_VAR_TOAST;
+				attrs = plan->detoast_reuse_outer;
+				scratch.opcode = EEOP_OUTER_VAR_DETOAST;
 				break;
 			default:
-				attrs = plan->predetoast_scanattrs;
-				scratch.opcode = EEOP_SCAN_VAR_TOAST;
+				attrs = plan->detoast_reuse_scan;
+				scratch.opcode = EEOP_SCAN_VAR_DETOAST;
 				break;
 		}
 		if (!bms_is_member(var->varattno, attrs))
@@ -3048,7 +3048,7 @@ ExecInitSubPlanExpr(SubPlan *subplan,
 		/*
 		 * A plain column value may have a detoasted copy beside its slot;
 		 * tell the step where, so that argument positions in the subplan can
-		 * use it (see ExecEvalParamExecToast).
+		 * use it (see ExecEvalParamExecDetoast).
 		 */
 		scratch.d.param.srcattnum = 0;
 		scratch.d.param.srcvarno = 0;

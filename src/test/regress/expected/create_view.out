@@ -2214,8 +2214,6 @@ select * from tt24v;
  Hash Join
    Output: (cte.r).column2, ((ROW("*VALUES*".column1, "*VALUES*".column2))).column2
    Hash Cond: ((cte.r).column1 = ((ROW("*VALUES*".column1, "*VALUES*".column2))).column1)
-   Pre-detoast Outer: cte.r
-   Pre-detoast Inner: (ROW("*VALUES*".column1, "*VALUES*".column2))
    CTE cte
      ->  Values Scan on "*VALUES*_1"
            Output: ROW("*VALUES*_1".column1, "*VALUES*_1".column2)
@@ -2227,7 +2225,7 @@ select * from tt24v;
                Output: (ROW("*VALUES*".column1, "*VALUES*".column2))
                ->  Values Scan on "*VALUES*"
                      Output: ROW("*VALUES*".column1, "*VALUES*".column2)
-(16 rows)
+(14 rows)
 
 explain (verbose, costs off)
 select (r).column2 from (select r from (values(1,2),(3,4)) r limit 1) ss;
