@@ -152,14 +152,6 @@ typedef struct TupleTableSlot
 } TupleTableSlot;
 
 /* routines for a TupleTableSlot implementation */
-/*
- * Every implementation must call ExecSlotResetDetoast() whenever it is about
- * to invalidate the slot's tts_values by other means than clear(), that is
- * in any function that stores a new tuple, copies another slot in, or
- * materializes the contents; see the in-tree implementations.  Otherwise a
- * detoasted copy of the previous tuple's value (tts_detoasted) could be
- * handed out for the new one.
- */
 struct TupleTableSlotOps
 {
 	/* Minimum size of the slot */
@@ -255,6 +247,20 @@ struct TupleTableSlotOps
 	 * with the minimal tuple without the need for an additional allocation.
 	 */
 	MinimalTuple (*copy_minimal_tuple) (TupleTableSlot *slot, Size extra);
+
+	/*
+	 * Does this implementation call ExecSlotResetDetoast() wherever it
+	 * invalidates tts_values by other means than clear(), that is in every
+	 * function that stores a new tuple, copies another slot in, or
+	 * materializes the contents?  Only then may the executor keep detoasted
+	 * copies of this slot's values beside it (tts_detoasted); otherwise a
+	 * copy made for one tuple could be handed out for the next.
+	 *
+	 * Leaving this false, as an implementation that does not know about the
+	 * field does, only costs the optimization.  See the in-tree
+	 * implementations for what setting it entails.
+	 */
+	bool		resets_detoasted;
 };
 
 /*
@@ -488,10 +494,9 @@ slot_is_current_xact_tuple(TupleTableSlot *slot)
 
 /*
  * Release the detoasted copies made by EEOP_*_VAR_TOAST steps or carried in
- * by EEOP_ASSIGN_*_VAR_TOAST.  The slot implementations call this whenever
- * the slot's tts_values are about to be invalidated (every store, clear and
- * materialize path), before any pointer into that memory could be looked at
- * again.
+ * by EEOP_ASSIGN_*_VAR_TOAST.  A slot implementation calls this whenever the
+ * slot's tts_values are about to be invalidated, before any pointer into that
+ * memory could be looked at again; see resets_detoasted above.
  */
 static inline void
 ExecSlotResetDetoast(TupleTableSlot *slot)

@@ -5756,12 +5756,18 @@ ExecEvalWholeRowVar(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
 /*
  * The detoasted copy of the slot's attnum'th value, made on first use.  The
  * caller has checked that attr is out of line or compressed.  Copies live in
- * the slot's detoast context, which the slot implementations reset whenever
+ * the slot's detoast context, which the slot implementation resets whenever
  * tts_values is invalidated; tts_values itself is never modified.
+ *
+ * An implementation that does not promise those resets keeps no copies, and
+ * its values are detoasted per reference as before.
  */
 static Datum
 slot_detoast_attr(TupleTableSlot *slot, int attnum, varlena *attr)
 {
+	if (!slot->tts_ops->resets_detoasted)
+		return PointerGetDatum(detoast_attr(attr));
+
 	if (unlikely(slot->tts_detoast_cxt == NULL))
 		slot->tts_detoast_cxt =
 			GenerationContextCreate(slot->tts_mcxt,
@@ -5834,8 +5840,8 @@ ExecEvalParamExecToast(ExprState *state, ExprEvalStep *op,
 	if (prm->isnull || slot == NULL)
 		return;
 	attnum = prm->detoast_attnum - 1;
-	if (attnum < 0 || attnum >= slot->tts_nvalid ||
-		slot->tts_isnull[attnum] || slot->tts_values[attnum] != prm->value)
+	if (attnum >= slot->tts_nvalid || slot->tts_isnull[attnum] ||
+		slot->tts_values[attnum] != prm->value)
 		return;
 	attr = (varlena *) DatumGetPointer(prm->value);
 	if (VARATT_IS_EXTERNAL_ONDISK(attr) || VARATT_IS_COMPRESSED(attr))
