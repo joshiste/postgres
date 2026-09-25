@@ -85,6 +85,11 @@ typedef enum ExprEvalOp
 	EEOP_OLD_VAR,
 	EEOP_NEW_VAR,
 
+	/* same, detoasting the value once per evaluation of this expression */
+	EEOP_INNER_VAR_DETOAST,
+	EEOP_OUTER_VAR_DETOAST,
+	EEOP_SCAN_VAR_DETOAST,
+
 	/* compute system Var value */
 	EEOP_INNER_SYSVAR,
 	EEOP_OUTER_SYSVAR,
@@ -906,6 +911,8 @@ extern void ExecEvalWholeRowVar(ExprState *state, ExprEvalStep *op,
 								ExprContext *econtext);
 extern void ExecEvalSysVar(ExprState *state, ExprEvalStep *op,
 						   ExprContext *econtext, TupleTableSlot *slot);
+extern void ExecEvalVarDetoast(ExprState *state, ExprEvalStep *op,
+							   ExprContext *econtext, TupleTableSlot *slot);
 
 extern void ExecAggInitGroup(AggState *aggstate, AggStatePerTrans pertrans, AggStatePerGroup pergroup,
 							 ExprContext *aggcontext);
