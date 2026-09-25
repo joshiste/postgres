@@ -816,6 +816,7 @@ Expr
 ExprContext
 ExprContextCallbackFunction
 ExprContext_CB
+ExprDetoastRef
 ExprDoneCond
 ExprEvalOp
 ExprEvalOpLookup
@@ -2106,6 +2107,7 @@ PTEntryArray
 PTIterationArray
 PTOKEN_PRIVILEGES
 PTOKEN_USER
+pull_multi_detoast_context
 PUTENVPROC
 PVIndStats
 PVIndVacStatus

@@ -535,6 +535,9 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		&&CASE_EEOP_ASSIGN_SCAN_VAR,
 		&&CASE_EEOP_ASSIGN_OLD_VAR,
 		&&CASE_EEOP_ASSIGN_NEW_VAR,
+		&&CASE_EEOP_ASSIGN_INNER_VAR_DETOAST,
+		&&CASE_EEOP_ASSIGN_OUTER_VAR_DETOAST,
+		&&CASE_EEOP_ASSIGN_SCAN_VAR_DETOAST,
 		&&CASE_EEOP_ASSIGN_TMP,
 		&&CASE_EEOP_ASSIGN_TMP_MAKE_RO,
 		&&CASE_EEOP_CONST,
@@ -895,6 +898,26 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			EEO_NEXT();
 		}
 
+		EEO_CASE(EEOP_ASSIGN_INNER_VAR_DETOAST)
+		{
+			ExecEvalAssignVarDetoast(state, op, econtext, innerslot);
+
+			EEO_NEXT();
+		}
+
+		EEO_CASE(EEOP_ASSIGN_OUTER_VAR_DETOAST)
+		{
+			ExecEvalAssignVarDetoast(state, op, econtext, outerslot);
+
+			EEO_NEXT();
+		}
+
+		EEO_CASE(EEOP_ASSIGN_SCAN_VAR_DETOAST)
+		{
+			ExecEvalAssignVarDetoast(state, op, econtext, scanslot);
+
+			EEO_NEXT();
+		}
 
 		EEO_CASE(EEOP_ASSIGN_OLD_VAR)
 		{
@@ -5783,6 +5806,40 @@ ExecEvalVarDetoast(ExprState *state, ExprEvalStep *op, ExprContext *econtext,
 				   TupleTableSlot *slot)
 {
 	ExecEvalVarDetoastInline(op, slot);
+}
+
+/*
+ * Projection of a column the node detoasts once per row: the stored datum
+ * goes into the result slot as usual, and the copy alongside it, so a parent
+ * reading the column as an argument finds it rather than making its own.
+ */
+void
+ExecEvalAssignVarDetoast(ExprState *state, ExprEvalStep *op,
+						 ExprContext *econtext, TupleTableSlot *slot)
+{
+	TupleTableSlot *resultslot = state->resultslot;
+	int			resultnum = op->d.assign_var.resultnum;
+	int			attnum = op->d.assign_var.attnum;
+
+	Assert(attnum >= 0 && attnum < slot->tts_nvalid);
+	Assert(resultnum >= 0 && resultnum < resultslot->tts_tupleDescriptor->natts);
+	resultslot->tts_values[resultnum] = slot->tts_values[attnum];
+	resultslot->tts_isnull[resultnum] = slot->tts_isnull[attnum];
+
+	if (slot->tts_detoasted != NULL && slot->tts_detoasted[attnum] != (Datum) 0)
+	{
+		if (unlikely(resultslot->tts_detoast_cxt == NULL))
+			resultslot->tts_detoast_cxt =
+				GenerationContextCreate(resultslot->tts_mcxt,
+										"detoasted slot values",
+										ALLOCSET_DEFAULT_SIZES);
+		if (resultslot->tts_detoasted == NULL)
+			resultslot->tts_detoasted =
+				MemoryContextAllocZero(resultslot->tts_detoast_cxt,
+									   resultslot->tts_tupleDescriptor->natts *
+									   sizeof(Datum));
+		resultslot->tts_detoasted[resultnum] = slot->tts_detoasted[attnum];
+	}
 }
 
 void
