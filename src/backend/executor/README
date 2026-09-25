@@ -319,7 +319,10 @@ releases the copies whenever it invalidates tts_values, in its store, clear
 and materialize paths; an implementation that leaves the field false keeps
 no copies at all and simply detoasts per reference.  A projection of a
 marked column carries the copy into the result slot alongside the stored
-datum, so a parent node reading that column as an argument finds it.
+datum, so a parent node reading that column as an argument finds it.  A
+PARAM_EXEC parameter carries a reference to the slot and attribute its value
+came from rather than a pointer to the copy, and that reference is followed
+only while the slot still holds the same datum.
 
 The planner decides only where this pays, in set_plan_detoast_reuse() in
 setrefs.c, which records per node the attributes two or more argument

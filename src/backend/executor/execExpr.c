@@ -1027,6 +1027,7 @@ ExecInitDetoastArg(Expr *arg, ExprState *state, Datum *resv, bool *resnull)
 	PlanState  *parent = state->parent;
 	Expr	   *expr = arg;
 	Plan	   *plan;
+	PlannedStmt *pstmt;
 
 	/*
 	 * Expressions outside a plan tree, and the ones COPY compiles against a
@@ -1038,10 +1039,13 @@ ExecInitDetoastArg(Expr *arg, ExprState *state, Datum *resv, bool *resnull)
 		return;
 	}
 	plan = parent->plan;
+	pstmt = parent->state ? parent->state->es_plannedstmt : NULL;
 
 	while (IsA(expr, RelabelType))
 		expr = ((RelabelType *) expr)->arg;
-	if (!((IsA(expr, Var) && plan != NULL &&
+	if (!((IsA(expr, Param) && ((Param *) expr)->paramkind == PARAM_EXEC &&
+		   pstmt != NULL && pstmt->detoastReuse) ||
+		  (IsA(expr, Var) && plan != NULL &&
 		   (plan->detoast_reuse_scan != NULL ||
 			plan->detoast_reuse_outer != NULL ||
 			plan->detoast_reuse_inner != NULL))) ||
@@ -1068,6 +1072,18 @@ ExecPushDetoastArgStep(Expr *expr, ExprState *state, Datum *resv, bool *resnull)
 {
 	ExprEvalStep scratch = {0};
 
+	if (IsA(expr, Param))
+	{
+		Param	   *param = (Param *) expr;
+
+		if (param->paramkind != PARAM_EXEC ||
+			get_typlen(param->paramtype) != -1)
+			return false;
+		scratch.opcode = EEOP_PARAM_EXEC_DETOAST;
+		scratch.d.param.paramid = param->paramid;
+		scratch.d.param.paramtype = param->paramtype;
+	}
+	else
 	{
 		Var		   *var = (Var *) expr;
 		Plan	   *plan = state->parent->plan;
@@ -3063,6 +3079,7 @@ ExecInitSubPlanExpr(SubPlan *subplan,
 	{
 		int			paramid = lfirst_int(l);
 		Expr	   *arg = (Expr *) lfirst(pvar);
+		Expr	   *src = arg;
 
 		ExecInitExprRec(arg, state, resv, resnull);
 
@@ -3072,6 +3089,22 @@ ExecInitSubPlanExpr(SubPlan *subplan,
 		scratch.d.param.paramid = paramid;
 		/* paramtype's not actually used, but we might as well fill it */
 		scratch.d.param.paramtype = exprType((Node *) arg);
+
+		/*
+		 * A plain column value may have a detoasted copy beside its slot;
+		 * tell the step where, so that argument positions in the subplan can
+		 * use it (see ExecEvalParamExecDetoast).
+		 */
+		scratch.d.param.srcattnum = 0;
+		scratch.d.param.srcvarno = 0;
+		while (IsA(src, RelabelType))
+			src = ((RelabelType *) src)->arg;
+		if (IsA(src, Var) && ((Var *) src)->varattno > 0 &&
+			((Var *) src)->varreturningtype == VAR_RETURNING_DEFAULT)
+		{
+			scratch.d.param.srcattnum = ((Var *) src)->varattno;
+			scratch.d.param.srcvarno = ((Var *) src)->varno;
+		}
 		ExprEvalPushStep(state, &scratch);
 	}
 
