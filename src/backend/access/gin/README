@@ -386,6 +386,37 @@ produced by split.  Parent 'c' is about to have downlink inserted.
    e   f   g  hE  q   i   j   k
 
 
+### Reusing the leaf page between insertions
+
+The entries of one indexed value are extracted sorted and deduplicated by
+ginExtractEntries(), and the accumulators drained by index build emit their
+keys in order as well.  Consecutive insertions therefore usually belong on the
+same leaf, yet each one calls ginFindLeafPage() and descends from the root
+again.
+
+For a run of such insertions we keep the whole descent path of the previous
+one, pinned but not locked, and reuse its leaf when the next key still belongs
+there.  This extends the pin keeping described above from a single insertion to
+a run of them.  ginBeginEntryInsertRun() and ginEndEntryInsertRun() bracket the
+run and bound how long the pins are held; outside a run nothing is remembered.
+
+The whole path is kept rather than only the leaf, because ginPlaceToPage()
+treats a stack with no parent as the root, and ginFinishSplit() walks
+stack->parent to install the downlink of a split page.
+
+A remembered page is re-validated before it is used: it must still be a leaf
+with no incomplete split, and the key must lie inside its range.  The upper
+bound is the ordinary isMoveRight test.  The lower bound needs a separate
+isMoveLeft test, because a descent can never land to the left of the correct
+page, while a page remembered for an earlier and smaller key can.  Correctness
+therefore does not depend on callers supplying keys in order; an out-of-order
+key simply misses and descends.
+
+A remembered path can only go stale by splitting, which isMoveRight detects.
+It cannot go stale by page deletion, since vacuum never deletes pages from the
+entry tree.  That is the same property which lets the greatest leaf tuple serve
+as a page's high key.
+
 ### Page deletion
 
 Vacuum never deletes tuples or pages from the entry tree. It traverses entry

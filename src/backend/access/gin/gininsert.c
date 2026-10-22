@@ -472,14 +472,23 @@ ginBuildCallback(Relation index, ItemPointer tid, Datum *values,
 		OffsetNumber attnum;
 
 		ginBeginBAScan(&buildstate->accum);
-		while ((list = ginGetBAEntry(&buildstate->accum,
-									 &attnum, &key, &category, &nlist)) != NULL)
+		ginBeginEntryInsertRun();
+		PG_TRY();
 		{
-			/* there could be many entries, so be willing to abort here */
-			CHECK_FOR_INTERRUPTS();
-			ginEntryInsert(&buildstate->ginstate, attnum, key, category,
-						   list, nlist, &buildstate->buildStats);
+			while ((list = ginGetBAEntry(&buildstate->accum,
+										 &attnum, &key, &category, &nlist)) != NULL)
+			{
+				/* there could be many entries, so be willing to abort here */
+				CHECK_FOR_INTERRUPTS();
+				ginEntryInsert(&buildstate->ginstate, attnum, key, category,
+							   list, nlist, &buildstate->buildStats);
+			}
 		}
+		PG_FINALLY();
+		{
+			ginEndEntryInsertRun();
+		}
+		PG_END_TRY();
 
 		MemoryContextReset(buildstate->tmpCtx);
 		ginInitBA(&buildstate->accum);
@@ -763,14 +772,23 @@ ginbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 		/* dump remaining entries to the index */
 		oldCtx = MemoryContextSwitchTo(buildstate.tmpCtx);
 		ginBeginBAScan(&buildstate.accum);
-		while ((list = ginGetBAEntry(&buildstate.accum,
-									 &attnum, &key, &category, &nlist)) != NULL)
+		ginBeginEntryInsertRun();
+		PG_TRY();
 		{
-			/* there could be many entries, so be willing to abort here */
-			CHECK_FOR_INTERRUPTS();
-			ginEntryInsert(&buildstate.ginstate, attnum, key, category,
-						   list, nlist, &buildstate.buildStats);
+			while ((list = ginGetBAEntry(&buildstate.accum,
+										 &attnum, &key, &category, &nlist)) != NULL)
+			{
+				/* there could be many entries, so be willing to abort here */
+				CHECK_FOR_INTERRUPTS();
+				ginEntryInsert(&buildstate.ginstate, attnum, key, category,
+							   list, nlist, &buildstate.buildStats);
+			}
 		}
+		PG_FINALLY();
+		{
+			ginEndEntryInsertRun();
+		}
+		PG_END_TRY();
 		MemoryContextSwitchTo(oldCtx);
 	}
 
@@ -852,13 +870,22 @@ ginHeapTupleInsert(GinState *ginstate, OffsetNumber attnum,
 	entries = ginExtractEntries(ginstate, attnum, value, isNull,
 								&nentries, &categories);
 
-	for (i = 0; i < nentries; i++)
+	ginBeginEntryInsertRun();
+	PG_TRY();
 	{
-		/* there could be many entries, so be willing to abort here */
-		CHECK_FOR_INTERRUPTS();
-		ginEntryInsert(ginstate, attnum, entries[i], categories[i],
-					   item, 1, NULL);
+		for (i = 0; i < nentries; i++)
+		{
+			/* there could be many entries, so be willing to abort here */
+			CHECK_FOR_INTERRUPTS();
+			ginEntryInsert(ginstate, attnum, entries[i], categories[i],
+						   item, 1, NULL);
+		}
 	}
+	PG_FINALLY();
+	{
+		ginEndEntryInsertRun();
+	}
+	PG_END_TRY();
 }
 
 bool

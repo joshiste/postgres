@@ -239,6 +239,33 @@ getRightMostTuple(Page page)
 	return (IndexTuple) PageGetItem(page, PageGetItemId(page, maxoff));
 }
 
+/*
+ * Check whether the search key sorts before everything on this page, that is,
+ * whether it belongs on a page to the left.  entryIsMoveRight() only bounds
+ * the key from above, so both are needed to confirm that a page remembered
+ * from an earlier descent really is the page this key belongs on.
+ */
+static bool
+entryIsMoveLeft(GinBtree btree, Page page)
+{
+	IndexTuple	itup;
+	OffsetNumber attnum;
+	Datum		key;
+	GinNullCategory category;
+
+	if (PageGetMaxOffsetNumber(page) < FirstOffsetNumber)
+		return true;			/* an empty page tells us nothing */
+
+	itup = (IndexTuple) PageGetItem(page, PageGetItemId(page, FirstOffsetNumber));
+	attnum = gintuple_get_attrnum(btree->ginstate, itup);
+	key = gintuple_get_key(btree->ginstate, itup, &category);
+
+	return (ginCompareAttEntries(btree->ginstate,
+								 btree->entryAttnum, btree->entryKey,
+								 btree->entryCategory,
+								 attnum, key, category) < 0);
+}
+
 static bool
 entryIsMoveRight(GinBtree btree, Page page)
 {
@@ -757,6 +784,7 @@ ginPrepareEntryScan(GinBtree btree, OffsetNumber attnum,
 	btree->findChildPage = entryLocateEntry;
 	btree->getLeftMostChild = entryGetLeftMostPage;
 	btree->isMoveRight = entryIsMoveRight;
+	btree->isMoveLeft = entryIsMoveLeft;
 	btree->findItem = entryLocateLeafEntry;
 	btree->findChildPtr = entryFindChildPtr;
 	btree->beginPlaceToPage = entryBeginPlaceToPage;

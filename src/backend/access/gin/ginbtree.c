@@ -33,6 +33,171 @@ static void ginFinishOldSplit(GinBtree btree, GinBtreeStack *stack,
 							  GinStatsData *buildStats, int access);
 
 /*
+ * Remembered descent path to the entry tree leaf that the previous insertion
+ * landed on, reused when the next key still belongs on that leaf.  Only pins
+ * are held between insertions, never locks.  See "Reusing the leaf page
+ * between insertions" in the README for why the whole path is kept, and why
+ * coming back to a remembered page is safe.
+ */
+
+/* deeper entry trees than this do not occur in practice, so don't bother */
+#define GIN_LEAFCACHE_MAXDEPTH	8
+
+/*
+ * With no internal level between the root and the leaf, a hit would save a
+ * single page access, too little to pay for re-validating the misses.
+ */
+#define GIN_LEAFCACHE_MINDEPTH	3
+
+typedef struct GinEntryLeafCache
+{
+	bool		active;			/* inside a run? */
+	int			depth;			/* 0 if empty; [0] is the leaf, last the root */
+	Buffer		buffer[GIN_LEAFCACHE_MAXDEPTH]; /* pinned, not locked */
+	OffsetNumber off[GIN_LEAFCACHE_MAXDEPTH];
+	Oid			relid;			/* index the path belongs to */
+	OffsetNumber attnum;
+} GinEntryLeafCache;
+
+static GinEntryLeafCache leafCache = {0};
+
+static void
+ginForgetLeafPath(void)
+{
+	while (leafCache.depth > 0)
+		ReleaseBuffer(leafCache.buffer[--leafCache.depth]);
+}
+
+/*
+ * Start and end a run of insertions into one index's entry tree.
+ *
+ * Callers pair these with PG_TRY/PG_FINALLY, so that no run in progress means
+ * no path remembered.  That invariant is what makes the ginEntryInsert() calls
+ * outside any run - those in _gin_parallel_merge() - safe: they find the cache
+ * inactive and never probe a path someone else left behind.
+ *
+ * The pins do not need the PG_FINALLY; the resource owner releases them when a
+ * statement fails.  The recorded path does, since it would otherwise still name
+ * buffers this backend no longer owns.
+ */
+void
+ginBeginEntryInsertRun(void)
+{
+	leafCache.depth = 0;
+	leafCache.active = true;
+}
+
+void
+ginEndEntryInsertRun(void)
+{
+	ginForgetLeafPath();
+	leafCache.active = false;
+}
+
+/*
+ * Remember the path a completed descent took, so that the next insertion into
+ * the same entry tree can try to reuse its leaf.
+ */
+/*
+ * Remember the path a completed descent took, so that the next insertion into
+ * the same entry tree can try to reuse its leaf.  depth is the number of
+ * levels the descent walked, which ginFindLeafPage() has counted for us.
+ */
+static void
+ginRememberLeafPath(GinBtree btree, GinBtreeStack *stack, int depth)
+{
+	GinBtreeStack *src;
+	int			i;
+
+	if (depth < GIN_LEAFCACHE_MINDEPTH || depth > GIN_LEAFCACHE_MAXDEPTH)
+		return;
+
+	ginForgetLeafPath();
+
+	/* bounded by depth, so a miscount cannot run past the array */
+	for (src = stack, i = 0; i < depth; src = src->parent, i++)
+	{
+		Assert(src != NULL);
+		leafCache.buffer[i] = src->buffer;
+		leafCache.off[i] = src->off;
+		IncrBufferRefCount(src->buffer);
+	}
+
+	/*
+	 * the chain ended exactly at depth, and ginFindParents() needs its top to
+	 * be the root
+	 */
+	Assert(src == NULL);
+	Assert(BufferGetBlockNumber(leafCache.buffer[depth - 1]) == btree->rootBlkno);
+
+	leafCache.depth = depth;
+	leafCache.relid = RelationGetRelid(btree->index);
+	leafCache.attnum = btree->entryAttnum;
+}
+
+/*
+ * Try to satisfy a descent from the remembered path.  Returns a stack with the
+ * leaf locked, or NULL if the caller has to descend for real.
+ */
+static GinBtreeStack *
+ginTryRememberedLeaf(GinBtree btree)
+{
+	Buffer		buf = leafCache.buffer[0];
+	Page		page;
+	GinBtreeStack *stack = NULL;
+	GinBtreeStack *child = NULL;
+	int			i;
+
+	IncrBufferRefCount(buf);	/* the returned stack owns this pin */
+
+	/*
+	 * ginTraverseLock() takes an exclusive lock on a leaf; it falls back to a
+	 * share lock only if the page turned out not to be one, which the
+	 * GinPageIsLeaf() test below rejects anyway.
+	 */
+	(void) ginTraverseLock(buf, false);
+	page = BufferGetPage(buf);
+
+	Assert(!GinPageIsDeleted(page));	/* entry tree pages are never deleted */
+
+	if (!GinPageIsLeaf(page) ||
+		GinPageIsIncompleteSplit(page) ||
+		btree->isMoveRight(btree, page) ||
+		btree->isMoveLeft(btree, page))
+	{
+		LockBuffer(buf, GIN_UNLOCK);
+		ReleaseBuffer(buf);
+		return NULL;
+	}
+
+	/* rebuild the stack from the leaf up, so a split can walk up it as usual */
+	for (i = 0; i < leafCache.depth; i++)
+	{
+		GinBtreeStack *ptr = palloc_object(GinBtreeStack);
+
+		if (i == 0)
+			ptr->buffer = buf;	/* pinned above */
+		else
+		{
+			ptr->buffer = leafCache.buffer[i];
+			IncrBufferRefCount(ptr->buffer);
+		}
+		ptr->blkno = BufferGetBlockNumber(ptr->buffer);
+		ptr->off = leafCache.off[i];
+		ptr->predictNumber = 1;
+		ptr->parent = NULL;
+
+		if (child == NULL)
+			stack = ptr;
+		else
+			child->parent = ptr;
+		child = ptr;
+	}
+
+	return stack;
+}
+
+/*
  * Lock buffer by needed method for search.
  */
 int
@@ -84,7 +249,19 @@ ginFindLeafPage(GinBtree btree, bool searchMode,
 				bool rootConflictCheck)
 {
 	GinBtreeStack *stack;
+	int			depth;
 
+	if (leafCache.active && leafCache.depth > 0 &&
+		!searchMode && !rootConflictCheck && !btree->isData &&
+		leafCache.relid == RelationGetRelid(btree->index) &&
+		leafCache.attnum == btree->entryAttnum)
+	{
+		stack = ginTryRememberedLeaf(btree);
+		if (stack != NULL)
+			return stack;
+	}
+
+	depth = 1;					/* the root entry below */
 	stack = palloc_object(GinBtreeStack);
 	stack->blkno = btree->rootBlkno;
 	stack->buffer = ReadBuffer(btree->index, btree->rootBlkno);
@@ -135,7 +312,11 @@ ginFindLeafPage(GinBtree btree, bool searchMode,
 		}
 
 		if (GinPageIsLeaf(page))	/* we found, return locked page */
+		{
+			if (leafCache.active && !searchMode && !btree->isData)
+				ginRememberLeafPath(btree, stack, depth);
 			return stack;
+		}
 
 		/* now we have correct buffer, try to find child */
 		child = btree->findChildPage(btree, stack);
@@ -154,6 +335,7 @@ ginFindLeafPage(GinBtree btree, bool searchMode,
 		{
 			GinBtreeStack *ptr = palloc_object(GinBtreeStack);
 
+			depth++;
 			ptr->parent = stack;
 			stack = ptr;
 			stack->blkno = child;

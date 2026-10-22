@@ -1105,6 +1105,7 @@ GinBuildState
 GinChkVal
 GinEntries
 GinEntryAccumulator
+GinEntryLeafCache
 GinIndexStat
 GinLeader
 GinMetaPageData

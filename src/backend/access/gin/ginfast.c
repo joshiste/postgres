@@ -925,13 +925,22 @@ ginInsertCleanup(GinState *ginstate, bool must_empty_list,
 			 * list.
 			 */
 			ginBeginBAScan(&accum);
-			while ((list = ginGetBAEntry(&accum,
-										 &attnum, &key, &category, &nlist)) != NULL)
+			ginBeginEntryInsertRun();
+			PG_TRY();
 			{
-				ginEntryInsert(ginstate, attnum, key, category,
-							   list, nlist, NULL);
-				vacuum_delay_point(false);
+				while ((list = ginGetBAEntry(&accum,
+											 &attnum, &key, &category, &nlist)) != NULL)
+				{
+					ginEntryInsert(ginstate, attnum, key, category,
+								   list, nlist, NULL);
+					vacuum_delay_point(false);
+				}
 			}
+			PG_FINALLY();
+			{
+				ginEndEntryInsertRun();
+			}
+			PG_END_TRY();
 
 			/*
 			 * Lock the whole list to remove pages
@@ -955,10 +964,19 @@ ginInsertCleanup(GinState *ginstate, bool must_empty_list,
 				processPendingPage(&accum, &datums, page, maxoff + 1);
 
 				ginBeginBAScan(&accum);
-				while ((list = ginGetBAEntry(&accum,
-											 &attnum, &key, &category, &nlist)) != NULL)
-					ginEntryInsert(ginstate, attnum, key, category,
-								   list, nlist, NULL);
+				ginBeginEntryInsertRun();
+				PG_TRY();
+				{
+					while ((list = ginGetBAEntry(&accum,
+												 &attnum, &key, &category, &nlist)) != NULL)
+						ginEntryInsert(ginstate, attnum, key, category,
+									   list, nlist, NULL);
+				}
+				PG_FINALLY();
+				{
+					ginEndEntryInsertRun();
+				}
+				PG_END_TRY();
 			}
 
 			/*

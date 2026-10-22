@@ -1889,6 +1889,7 @@ ginPrepareDataScan(GinBtree btree, Relation index, BlockNumber rootBlkno)
 	btree->findChildPage = dataLocateItem;
 	btree->getLeftMostChild = dataGetLeftMostPage;
 	btree->isMoveRight = dataIsMoveRight;
+	btree->isMoveLeft = NULL;	/* the leaf cache is for entry trees only */
 	btree->findItem = NULL;
 	btree->findChildPtr = dataFindChildPtr;
 	btree->beginPlaceToPage = dataBeginPlaceToPage;

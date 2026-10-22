@@ -150,6 +150,7 @@ typedef struct GinBtreeData
 	BlockNumber (*findChildPage) (GinBtree, GinBtreeStack *);
 	BlockNumber (*getLeftMostChild) (GinBtree, Page);
 	bool		(*isMoveRight) (GinBtree, Page);
+	bool		(*isMoveLeft) (GinBtree, Page);
 	bool		(*findItem) (GinBtree, GinBtreeStack *);
 
 	/* insert methods */
@@ -203,6 +204,8 @@ extern GinBtreeStack *ginFindLeafPage(GinBtree btree, bool searchMode,
 									  bool rootConflictCheck);
 extern Buffer ginStepRight(Buffer buffer, Relation index, int lockmode);
 extern void freeGinBtreeStack(GinBtreeStack *stack);
+extern void ginBeginEntryInsertRun(void);
+extern void ginEndEntryInsertRun(void);
 extern void ginInsertValue(GinBtree btree, GinBtreeStack *stack,
 						   void *insertdata, GinStatsData *buildStats);
 
