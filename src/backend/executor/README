@@ -298,9 +298,7 @@ unchanged, compiles as it always did and yields the stored datum.  This is
 why a detoasted copy can never become the result of an expression and never
 reaches code that must see the stored form.
 
-Three lists decide where the copy goes.  The first two implement the rule
-above and must be kept consistent with it; the third only decides where a
-copy pays.
+Two lists decide where the copy goes.
 
 - The argument positions themselves.  ExecInitDetoastArg() is called at each
   one in execExpr.c, and pull_multi_detoast_walker() in clauses.c counts
@@ -309,18 +307,25 @@ copy pays.
   could return a copy as an expression result.  The planner's list decides
   where a copy pays, so if the two drift apart an attribute is marked and
   unused, or a sharing opportunity is missed.
-- Functions that must receive the stored representation because their result
-  depends on it: ExecFuncReadsStoredForm() in execExpr.c, asked by
-  ExecInitFunc() and ExecInitFuncArgList(), which between them compile the
-  arguments of every FuncExpr and OpExpr, including a function called in
-  FROM.  The remaining positions that call a function (ScalarArrayOpExpr,
-  RowCompareExpr, hash keys) call comparison or hash support functions,
-  which by contract depend only on the value.
-- Functions that read only a slice or the size of their argument, which the
-  planner does not count as references worth sharing:
-  ExecFuncReadsSliceOrSize() in execExpr.c.  A column shared for other
-  reasons is still handed to one of these, since by then the copy exists and
-  using it is cheaper than fetching a slice as well.
+- How a function reads each argument: ExecFuncArgRead() in execExpr.c,
+  which both the executor and the planner ask.  It answers from three
+  hardcoded lists and from the call itself.  Functions whose result depends
+  on the stored representation (pg_column_size() and its kin) receive the
+  stored datum.  Functions that may read none or only part of a value -- a
+  slice or the size of their first argument, or, for text and bytea
+  equality against a fixed value, the sizes alone -- never make a copy:
+  their argument step hands out the copy if another reference has already
+  made it, and the stored datum otherwise, since making it would read the
+  whole value where the function reads a chunk or nothing, and the
+  references after it might never be evaluated.  The planner does not count
+  the slice and size readers as references, and counts equality, which reads
+  the whole value when the sizes match.  Everything else, including a
+  function missing from the lists, reads the whole value.  ExecInitFunc()
+  and ExecInitFuncArgList() between them compile the arguments of every
+  FuncExpr and OpExpr, including a function called in FROM; the remaining
+  positions that call a function (ScalarArrayOpExpr's hashed form,
+  RowCompareExpr, hash keys) call comparison or hash support functions, which
+  by contract depend only on the value and read it whole.
 
 Lifetime.  A copy belongs to the tuple the slot holds.  A slot implementation
 promises, through TupleTableSlotOps.resets_detoasted, to release the copies

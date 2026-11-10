@@ -11,6 +11,7 @@ tests += {
   'regress': {
     'sql': [
       'detoast_reuse',
+      'detoast_reuse_icu',
     ],
     # The injection points are cluster-wide, so disable installcheck
     'runningcheck': false,

@@ -82,6 +82,35 @@ FROM sd, LATERAL pg_column_size(sd.ctxt) s, LATERAL pg_column_compression(sd.ctx
 WHERE sd.doc ? 'a' AND sd.doc ? 'b' AND sd.ctxt LIKE 'x%' AND sd.ctxt LIKE '%x';
 -- slice and size readers do not count as detoasting references: no detoast at all
 SELECT octet_length(txt), substr(txt, 1, 3), starts_with(txt, 'abc'), left(txt, 3) FROM sd;
+-- a slice or size reader takes the copy when the column has one and
+-- otherwise reads the stored datum, so it never detoasts the whole value
+-- itself; with the slice point attached, a NOTICE also marks each slice
+-- fetched from the toast table
+SELECT injection_points_attach('detoast-attr-slice-external', 'notice');
+-- equality compares the sizes first: no detoast
+SELECT count(*) FROM sd WHERE txt = 'x' OR txt = 'y';
+-- and so does IN ahead of two full readers: no detoast
+SELECT CASE WHEN txt IN ('x', 'y') THEN length(txt) > 0 AND position('a6' in txt) > 0 ELSE false END FROM sd;
+-- a size test that fails ahead of two full readers: no detoast
+SELECT CASE WHEN octet_length(txt) < 10 THEN length(txt) > 0 AND position('a6' in txt) > 0 ELSE false END FROM sd;
+-- a slice test that fails ahead of two full readers: one slice, no detoast
+SELECT CASE WHEN left(txt, 3) = 'zzz' THEN length(txt) > 0 AND position('a6' in txt) > 0 ELSE false END FROM sd;
+-- a slice test that passes: one slice, then the full readers share one detoast
+SELECT CASE WHEN left(txt, 3) = 'abc' THEN length(txt) > 0 AND position('a6' in txt) > 0 ELSE false END FROM sd;
+-- full readers first: the slice and size readers after them take the copy,
+-- one detoast and no slice
+SELECT length(txt) > 0 AND position('a6' in txt) > 0 AND left(txt, 3) = 'abc' AND txt <> 'x' FROM sd;
+-- equality between two columns, whose sizes match when the values do, and
+-- the whole readers below are not slice readers: each makes the copy for the
+-- readers after it, one detoast
+SELECT ctxt = ctxt AS eq, length(md5(ctxt)) FROM sd;
+SELECT right(txt, 3), length(txt), position('a6' in txt) > 0 FROM sd;
+SELECT left(txt, -3) = 'x', length(txt), position('a6' in txt) > 0 FROM sd;
+-- starts_with() slices its first argument and reads its second whole
+SELECT starts_with(repeat('a', 7000), txt), length(txt), position('a6' in txt) > 0 FROM sd;
+-- in FROM, through a nestloop parameter: one slice, no detoast
+SELECT s FROM sd, LATERAL substr(sd.txt, 1, 3) s;
+SELECT injection_points_detach('detoast-attr-slice-external');
 -- a compressed inline value is decompressed once for two full readers
 SELECT length(md5(ctxt)), ctxt = ctxt FROM sd;
 

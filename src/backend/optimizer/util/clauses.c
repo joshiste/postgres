@@ -6919,6 +6919,37 @@ pull_multi_detoast_args(List *args, bool detoasts,
 	}
 }
 
+/*
+ * Count the arguments of a call to funcid that read the whole value, as
+ * ExecFuncArgRead() says the executor compiles them.  An argument that may
+ * be read only in part does not count; one compared by size first does,
+ * since it is read whole when the sizes match.
+ */
+static void
+pull_multi_detoast_call(List *args, Oid funcid, Oid inputcollid,
+						pull_multi_detoast_context *context)
+{
+	ListCell   *lc;
+
+	foreach(lc, args)
+	{
+		Node	   *arg = (Node *) lfirst(lc);
+
+		switch (ExecFuncArgRead(funcid, args, foreach_current_index(lc),
+								inputcollid))
+		{
+			case FUNC_ARG_READS_WHOLE:
+			case FUNC_ARG_READS_SIZE_FIRST:
+				pull_multi_detoast_count(arg, context);
+				break;
+			case FUNC_ARG_READS_STORED:
+			case FUNC_ARG_READS_PART:
+				pull_multi_detoast_walker(arg, context);
+				break;
+		}
+	}
+}
+
 static bool
 pull_multi_detoast_walker(Node *node, pull_multi_detoast_context *context)
 {
@@ -6934,25 +6965,31 @@ pull_multi_detoast_walker(Node *node, pull_multi_detoast_context *context)
 			{
 				FuncExpr   *f = (FuncExpr *) node;
 
-				/*
-				 * Functions that inspect the stored form are compiled to
-				 * receive the stored datum (see ExecInitFunc), so like slice
-				 * readers they do not count as detoasting references.
-				 */
-				pull_multi_detoast_args(f->args,
-										!ExecFuncReadsStoredForm(f->funcid) &&
-										!ExecFuncReadsSliceOrSize(f->funcid),
+				pull_multi_detoast_call(f->args, f->funcid, f->inputcollid,
 										context);
 				return false;
 			}
 		case T_OpExpr:
 		case T_DistinctExpr:
-			pull_multi_detoast_args(((OpExpr *) node)->args, true, context);
-			return false;
+			{
+				OpExpr	   *op = (OpExpr *) node;
+
+				pull_multi_detoast_call(op->args, op->opfuncid,
+										op->inputcollid, context);
+				return false;
+			}
 		case T_ScalarArrayOpExpr:
-			pull_multi_detoast_args(((ScalarArrayOpExpr *) node)->args, true,
-									context);
-			return false;
+			{
+				ScalarArrayOpExpr *saop = (ScalarArrayOpExpr *) node;
+
+				/* the hashed form hashes the whole scalar */
+				if (OidIsValid(saop->hashfuncid))
+					pull_multi_detoast_args(saop->args, true, context);
+				else
+					pull_multi_detoast_call(saop->args, saop->opfuncid,
+											saop->inputcollid, context);
+				return false;
+			}
 		case T_CoerceViaIO:
 			pull_multi_detoast_count((Node *) ((CoerceViaIO *) node)->arg,
 									 context);

@@ -77,7 +77,8 @@ ExecInitTableFunctionResult(Expr *expr,
 		FuncExpr   *func = (FuncExpr *) expr;
 
 		state->funcReturnsSet = func->funcretset;
-		state->args = ExecInitFuncArgList(func->args, func->funcid, parent);
+		state->args = ExecInitFuncArgList(func->args, func->funcid,
+										  func->inputcollid, parent);
 
 		init_sexpr(func->funcid, func->inputcollid, expr, state, parent,
 				   econtext->ecxt_per_query_memory, func->funcretset, false);
@@ -460,7 +461,8 @@ ExecInitFunctionResultSet(Expr *expr,
 	{
 		FuncExpr   *func = (FuncExpr *) expr;
 
-		state->args = ExecInitFuncArgList(func->args, func->funcid, parent);
+		state->args = ExecInitFuncArgList(func->args, func->funcid,
+										  func->inputcollid, parent);
 		init_sexpr(func->funcid, func->inputcollid, expr, state, parent,
 				   econtext->ecxt_per_query_memory, true, true);
 	}
@@ -468,7 +470,8 @@ ExecInitFunctionResultSet(Expr *expr,
 	{
 		OpExpr	   *op = (OpExpr *) expr;
 
-		state->args = ExecInitFuncArgList(op->args, op->opfuncid, parent);
+		state->args = ExecInitFuncArgList(op->args, op->opfuncid,
+										  op->inputcollid, parent);
 		init_sexpr(op->opfuncid, op->inputcollid, expr, state, parent,
 				   econtext->ecxt_per_query_memory, true, true);
 	}

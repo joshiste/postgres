@@ -74,11 +74,20 @@ typedef struct ExprSetupInfo
 
 static void ExecReadyExpr(ExprState *state);
 static ExprState *ExecInitExprInternal(Expr *node, PlanState *parent,
-									   bool detoast_arg);
+									   bool detoast_arg, bool existing_only);
 static bool ExecPushDetoastArgStep(Expr *expr, ExprState *state,
-								   Datum *resv, bool *resnull);
+								   Datum *resv, bool *resnull,
+								   bool existing_only);
+static inline void ExecInitDetoastArgExt(Expr *arg, ExprState *state,
+										 Datum *resv, bool *resnull,
+										 bool existing_only);
 static inline void ExecInitDetoastArg(Expr *arg, ExprState *state,
 									  Datum *resv, bool *resnull);
+static bool ExecFuncReadsStoredForm(Oid funcid);
+static bool ExecFuncReadsSliceOrSize(Oid funcid);
+static bool ExecFuncComparesSizeFirst(Oid funcid);
+static void ExecInitFuncArg(Expr *arg, ExprState *state, Datum *resv,
+							bool *resnull, FuncArgRead read);
 static void ExecInitExprRec(Expr *node, ExprState *state,
 							Datum *resv, bool *resnull);
 static void ExecInitFunc(ExprEvalStep *scratch, Expr *node, List *args,
@@ -152,7 +161,7 @@ static void ExecInitJsonCoercion(ExprState *state, JsonReturning *returning,
 ExprState *
 ExecInitExpr(Expr *node, PlanState *parent)
 {
-	return ExecInitExprInternal(node, parent, false);
+	return ExecInitExprInternal(node, parent, false, false);
 }
 
 /*
@@ -165,35 +174,43 @@ ExecInitExpr(Expr *node, PlanState *parent)
 ExprState *
 ExecInitExprArg(Expr *node, PlanState *parent)
 {
-	return ExecInitExprInternal(node, parent, true);
+	return ExecInitExprInternal(node, parent, true, false);
 }
 
 /*
  * Prepare the arguments of a call to funcid that execSRF.c evaluates itself,
- * returning a list of ExprStates.  As in ExecInitFunc(), each is an argument
- * position unless the function reads the stored form.
+ * returning a list of ExprStates, each compiled as ExecFuncArgRead() says, as
+ * ExecInitFunc() does for the calls it compiles.
  */
 List *
-ExecInitFuncArgList(List *args, Oid funcid, PlanState *parent)
+ExecInitFuncArgList(List *args, Oid funcid, Oid inputcollid,
+					PlanState *parent)
 {
 	List	   *result = NIL;
 	ListCell   *lc;
 
-	if (ExecFuncReadsStoredForm(funcid))
-		return ExecInitExprList(args, parent);
-
 	foreach(lc, args)
 	{
 		Expr	   *e = lfirst(lc);
+		FuncArgRead read = ExecFuncArgRead(funcid, args,
+										   foreach_current_index(lc),
+										   inputcollid);
+		bool		existing_only = read != FUNC_ARG_READS_WHOLE;
 
-		result = lappend(result, ExecInitExprArg(e, parent));
+		if (read == FUNC_ARG_READS_STORED)
+			result = lappend(result, ExecInitExpr(e, parent));
+		else
+			result = lappend(result,
+							 ExecInitExprInternal(e, parent, true,
+												  existing_only));
 	}
 
 	return result;
 }
 
 static ExprState *
-ExecInitExprInternal(Expr *node, PlanState *parent, bool detoast_arg)
+ExecInitExprInternal(Expr *node, PlanState *parent, bool detoast_arg,
+					 bool existing_only)
 {
 	ExprState  *state;
 	ExprEvalStep scratch = {0};
@@ -213,7 +230,8 @@ ExecInitExprInternal(Expr *node, PlanState *parent, bool detoast_arg)
 
 	/* Compile the expression proper */
 	if (detoast_arg)
-		ExecInitDetoastArg(node, state, &state->resvalue, &state->resnull);
+		ExecInitDetoastArgExt(node, state, &state->resvalue, &state->resnull,
+							  existing_only);
 	else
 		ExecInitExprRec(node, state, &state->resvalue, &state->resnull);
 
@@ -978,11 +996,9 @@ ExecCheck(ExprState *state, ExprContext *econtext)
 
 /*
  * Functions whose result depends on how the argument is stored rather than on
- * its value, and which must therefore receive the stored datum.  Asked by
- * ExecInitFunc() and ExecInitFuncArgList(); the executor README says why the
- * other positions that call a function need not ask.
+ * its value, and which must therefore receive the stored datum.
  */
-bool
+static bool
 ExecFuncReadsStoredForm(Oid funcid)
 {
 	switch (funcid)
@@ -997,13 +1013,13 @@ ExecFuncReadsStoredForm(Oid funcid)
 }
 
 /*
- * Functions that read at most a prefix or the size of a varlena argument
+ * Functions that read at most a slice or the size of their first argument
  * (pg_detoast_datum_slice, toast_raw_datum_size) rather than the whole value.
- * Detoasting the whole value for one of these would cost more than it saves.
  * length(text) is not among them: it counts characters, which needs the whole
- * value in a multibyte encoding.
+ * value in a multibyte encoding; nor are right() and overlay(), which fetch
+ * the whole value before taking it apart.
  */
-bool
+static bool
 ExecFuncReadsSliceOrSize(Oid funcid)
 {
 	switch (funcid)
@@ -1018,11 +1034,6 @@ ExecFuncReadsSliceOrSize(Oid funcid)
 		case F_SUBSTRING_BYTEA_INT4_INT4:
 		case F_STARTS_WITH:
 		case F_LEFT:
-		case F_RIGHT:
-		case F_OVERLAY_TEXT_TEXT_INT4:
-		case F_OVERLAY_TEXT_TEXT_INT4_INT4:
-		case F_OVERLAY_BYTEA_BYTEA_INT4:
-		case F_OVERLAY_BYTEA_BYTEA_INT4_INT4:
 		case F_OCTET_LENGTH_TEXT:
 		case F_OCTET_LENGTH_BYTEA:
 		case F_LENGTH_BYTEA:
@@ -1030,6 +1041,87 @@ ExecFuncReadsSliceOrSize(Oid funcid)
 		default:
 			return false;
 	}
+}
+
+/*
+ * Functions that compare the sizes of their varlena arguments first and read
+ * them whole only when the sizes match: text equality under a deterministic
+ * collation, and bytea equality.
+ */
+static bool
+ExecFuncComparesSizeFirst(Oid funcid)
+{
+	switch (funcid)
+	{
+		case F_TEXTEQ:
+		case F_TEXTNE:
+		case F_BYTEAEQ:
+		case F_BYTEANE:
+			return true;
+		default:
+			return false;
+	}
+}
+
+/* A value that stays the same for every row, possibly relabeled */
+static bool
+IsFixedValue(Node *node)
+{
+	while (IsA(node, RelabelType))
+		node = (Node *) ((RelabelType *) node)->arg;
+	return IsA(node, Const) ||
+		(IsA(node, Param) && ((Param *) node)->paramkind == PARAM_EXTERN);
+}
+
+/*
+ * How a call to funcid with arguments args reads argument argno, from the
+ * three lists above and from the call itself.  The executor compiles each
+ * argument position accordingly (ExecInitFunc(), ExecInitFuncArgList()), and
+ * the planner counts references by the same answer when it decides what to
+ * share (pull_multi_detoast_walker()), so this is the one place that knows
+ * how a function reads its arguments.
+ *
+ * A function that may read none or only part of a value is handed a copy only
+ * if another reference has already made it: making the copy for it would
+ * read the whole value where it reads a chunk or nothing, and the references
+ * after it might never be evaluated.  Equality reads nothing beyond the sizes
+ * only when they differ, which is what to expect against a fixed value and
+ * not between two columns, so only the former counts as size-first.
+ */
+FuncArgRead
+ExecFuncArgRead(Oid funcid, List *args, int argno, Oid inputcollid)
+{
+	if (ExecFuncReadsStoredForm(funcid))
+		return FUNC_ARG_READS_STORED;
+
+	if (ExecFuncReadsSliceOrSize(funcid))
+	{
+		Node	   *n = list_length(args) > 1 ? lsecond(args) : NULL;
+
+		/* left() with a negative count reads the whole value */
+		if (argno != 0 ||
+			(funcid == F_LEFT && n != NULL && IsA(n, Const) &&
+			 !((Const *) n)->constisnull &&
+			 DatumGetInt32(((Const *) n)->constvalue) < 0))
+			return FUNC_ARG_READS_WHOLE;
+		return FUNC_ARG_READS_PART;
+	}
+
+	if (ExecFuncComparesSizeFirst(funcid) &&
+		(!OidIsValid(inputcollid) ||
+		 get_collation_isdeterministic(inputcollid)))
+	{
+		ListCell   *lc;
+
+		foreach(lc, args)
+		{
+			if (foreach_current_index(lc) != argno &&
+				IsFixedValue((Node *) lfirst(lc)))
+				return FUNC_ARG_READS_SIZE_FIRST;
+		}
+	}
+
+	return FUNC_ARG_READS_WHOLE;
 }
 
 /*
@@ -1041,6 +1133,18 @@ ExecFuncReadsSliceOrSize(Oid funcid)
  */
 static inline void
 ExecInitDetoastArg(Expr *arg, ExprState *state, Datum *resv, bool *resnull)
+{
+	ExecInitDetoastArgExt(arg, state, resv, resnull, false);
+}
+
+/*
+ * As ExecInitDetoastArg, and if existing_only, for a consumer that may read
+ * none of the value (see ExecFuncArgRead()): the step then hands out a copy
+ * that some other reference has made, and otherwise the stored datum.
+ */
+static inline void
+ExecInitDetoastArgExt(Expr *arg, ExprState *state, Datum *resv, bool *resnull,
+					  bool existing_only)
 {
 	PlanState  *parent = state->parent;
 	Expr	   *expr = arg;
@@ -1067,10 +1171,33 @@ ExecInitDetoastArg(Expr *arg, ExprState *state, Datum *resv, bool *resnull)
 		   (plan->detoast_reuse_scan != NULL ||
 			plan->detoast_reuse_outer != NULL ||
 			plan->detoast_reuse_inner != NULL))) ||
-		!ExecPushDetoastArgStep(expr, state, resv, resnull))
+		!ExecPushDetoastArgStep(expr, state, resv, resnull, existing_only))
 		ExecInitExprRec(arg, state, resv, resnull);
 }
 
+
+/*
+ * Prepare evaluation of a function argument the way ExecFuncArgRead() says
+ * the function reads it.
+ */
+static void
+ExecInitFuncArg(Expr *arg, ExprState *state, Datum *resv, bool *resnull,
+				FuncArgRead read)
+{
+	switch (read)
+	{
+		case FUNC_ARG_READS_WHOLE:
+			ExecInitDetoastArg(arg, state, resv, resnull);
+			break;
+		case FUNC_ARG_READS_STORED:
+			ExecInitExprRec(arg, state, resv, resnull);
+			break;
+		case FUNC_ARG_READS_PART:
+		case FUNC_ARG_READS_SIZE_FIRST:
+			ExecInitDetoastArgExt(arg, state, resv, resnull, true);
+			break;
+	}
+}
 
 /*
  * Out-of-line part of ExecInitDetoastArg: push the step that hands out the
@@ -1086,7 +1213,8 @@ ExecInitDetoastArg(Expr *arg, ExprState *state, Datum *resv, bool *resnull)
  * never get one.
  */
 static bool
-ExecPushDetoastArgStep(Expr *expr, ExprState *state, Datum *resv, bool *resnull)
+ExecPushDetoastArgStep(Expr *expr, ExprState *state, Datum *resv,
+					   bool *resnull, bool existing_only)
 {
 	ExprEvalStep scratch = {0};
 
@@ -1100,6 +1228,7 @@ ExecPushDetoastArgStep(Expr *expr, ExprState *state, Datum *resv, bool *resnull)
 		scratch.opcode = EEOP_PARAM_EXEC_DETOAST;
 		scratch.d.param.paramid = param->paramid;
 		scratch.d.param.paramtype = param->paramtype;
+		scratch.d.param.existing_only = existing_only;
 	}
 	else
 	{
@@ -1128,6 +1257,7 @@ ExecPushDetoastArgStep(Expr *expr, ExprState *state, Datum *resv, bool *resnull)
 			return false;
 		scratch.d.var.attnum = var->varattno - 1;
 		scratch.d.var.vartype = var->vartype;
+		scratch.d.var.existing_only = existing_only;
 	}
 	scratch.resvalue = resv;
 	scratch.resnull = resnull;
@@ -1604,10 +1734,14 @@ ExecInitExprRec(Expr *node, ExprState *state,
 				}
 				else
 				{
+					FuncArgRead read = ExecFuncArgRead(opexpr->opfuncid,
+													   opexpr->args, 0,
+													   opexpr->inputcollid);
+
 					/* Evaluate scalar directly into left function argument */
-					ExecInitDetoastArg(scalararg, state,
-									   &fcinfo->args[0].value,
-									   &fcinfo->args[0].isnull);
+					ExecInitFuncArg(scalararg, state,
+									&fcinfo->args[0].value,
+									&fcinfo->args[0].isnull, read);
 
 					/*
 					 * Evaluate array argument into our return value.  There's
@@ -2960,9 +3094,6 @@ ExecInitFunc(ExprEvalStep *scratch, Expr *node, List *args, Oid funcid,
 		aclcheck_error(aclresult, OBJECT_FUNCTION, get_func_name(funcid));
 	InvokeFunctionExecuteHook(funcid);
 
-	if (ExecFuncReadsStoredForm(funcid))
-		detoast_args = false;
-
 	/*
 	 * Safety check on nargs.  Under normal circumstances this should never
 	 * fail, as parser should check sooner.  But possibly it might fail if
@@ -3024,9 +3155,11 @@ ExecInitFunc(ExprEvalStep *scratch, Expr *node, List *args, Oid funcid,
 		else
 		{
 			if (detoast_args)
-				ExecInitDetoastArg(arg, state,
-								   &fcinfo->args[argno].value,
-								   &fcinfo->args[argno].isnull);
+				ExecInitFuncArg(arg, state,
+								&fcinfo->args[argno].value,
+								&fcinfo->args[argno].isnull,
+								ExecFuncArgRead(funcid, args, argno,
+												inputcollid));
 			else
 				ExecInitExprRec(arg, state,
 								&fcinfo->args[argno].value,

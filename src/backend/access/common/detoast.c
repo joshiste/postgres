@@ -234,6 +234,7 @@ detoast_attr_slice(varlena *attr,
 		uint32		compress_method;
 		bool		is_compressed;
 
+		INJECTION_POINT("detoast-attr-slice-external", NULL);
 		toast_external_info_get(attr, &toast_ext_data);
 		extsize = VARATT_EXTINFO_GET_EXTSIZE(toast_ext_data.extinfo);
 		compress_method = VARATT_EXTINFO_GET_COMPRESS_METHOD(toast_ext_data.extinfo);

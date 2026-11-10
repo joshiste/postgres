@@ -355,6 +355,8 @@ typedef struct ExprEvalStep
 			int			attnum;
 			Oid			vartype;	/* type OID of variable */
 			VarReturningType varreturningtype;	/* return old/new/default */
+			/* EEOP_*_VAR_DETOAST: hand out an existing copy, never make one */
+			bool		existing_only;
 		}			var;
 
 		/* for EEOP_WHOLEROW */
@@ -443,6 +445,8 @@ typedef struct ExprEvalStep
 			/* EEOP_PARAM_SET: the Var the value comes from, if a plain one */
 			int			srcattnum;	/* attribute number, or 0 */
 			Index		srcvarno;	/* INNER_VAR, OUTER_VAR or a scan varno */
+			/* EEOP_PARAM_EXEC_DETOAST: as for EEOP_*_VAR_DETOAST */
+			bool		existing_only;
 		}			param;
 
 		/* for EEOP_PARAM_CALLBACK */

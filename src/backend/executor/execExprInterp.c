@@ -5830,10 +5830,31 @@ slot_detoast_attr(TupleTableSlot *slot, int attnum, varlena *attr)
 }
 
 /*
+ * The copy slot_detoast_attr() has made of the attribute while the slot holds
+ * this tuple, or the stored datum if it has made none.  For a consumer that
+ * may read none of the value, for which making the copy would cost more than
+ * it saves.
+ */
+static Datum
+slot_detoast_attr_existing(TupleTableSlot *slot, int attnum)
+{
+	Assert(attnum >= 0 && attnum < slot->tts_nvalid);
+	Assert(!slot->tts_isnull[attnum]);
+
+	if (slot->tts_detoasted == NULL || slot->tts_detoasted[attnum] == (Datum) 0)
+		return slot->tts_values[attnum];
+
+	/* see slot_detoast_attr() */
+	Assert(slot->tts_detoast_src[attnum] == slot->tts_values[attnum]);
+
+	return slot->tts_detoasted[attnum];
+}
+
+/*
  * Out-of-line part of the EEOP_*_VAR_DETOAST steps.  The value really is
  * stored out of line or compressed, so take the copy beside the slot, making
  * it if this is the first reference to the column while the slot holds this
- * tuple.
+ * tuple, unless the step is for a consumer that only takes an existing one.
  */
 static void
 ExecEvalVarDetoastSlow(ExprEvalStep *op, TupleTableSlot *slot)
@@ -5841,7 +5862,10 @@ ExecEvalVarDetoastSlow(ExprEvalStep *op, TupleTableSlot *slot)
 	int			attnum = op->d.var.attnum;
 	varlena    *attr = (varlena *) DatumGetPointer(slot->tts_values[attnum]);
 
-	*op->resvalue = slot_detoast_attr(slot, attnum, attr);
+	if (op->d.var.existing_only)
+		*op->resvalue = slot_detoast_attr_existing(slot, attnum);
+	else
+		*op->resvalue = slot_detoast_attr(slot, attnum, attr);
 	*op->resnull = false;
 }
 
@@ -5936,7 +5960,11 @@ ExecEvalParamExecDetoast(ExprState *state, ExprEvalStep *op,
 		slot->tts_isnull[attnum] || slot->tts_values[attnum] != prm->value)
 		return;
 	attr = (varlena *) DatumGetPointer(prm->value);
-	if (VARATT_IS_EXTERNAL_ONDISK(attr) || VARATT_IS_COMPRESSED(attr))
+	if (!VARATT_IS_EXTERNAL_ONDISK(attr) && !VARATT_IS_COMPRESSED(attr))
+		return;
+	if (op->d.param.existing_only)
+		*op->resvalue = slot_detoast_attr_existing(slot, attnum);
+	else
 		*op->resvalue = slot_detoast_attr(slot, attnum, attr);
 }
 

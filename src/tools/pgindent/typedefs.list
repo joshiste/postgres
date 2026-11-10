@@ -1026,6 +1026,7 @@ From
 FromCharDateMode
 FromExpr
 FullTransactionId
+FuncArgRead
 FuncCall
 FuncCallContext
 FuncCandidateList

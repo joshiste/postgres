@@ -2,7 +2,7 @@
 
 EXTRA_INSTALL = src/test/modules/injection_points
 
-REGRESS = detoast_reuse
+REGRESS = detoast_reuse detoast_reuse_icu
 
 # The injection points are cluster-wide, so disable installcheck
 NO_INSTALLCHECK = 1

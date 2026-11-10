@@ -94,10 +94,21 @@ extern PGDLLIMPORT ExecutorEnd_hook_type ExecutorEnd_hook;
 /* GUC parameter */
 extern PGDLLIMPORT bool detoast_reuse;
 
+/* How a function reads one of its arguments; see ExecFuncArgRead() */
+typedef enum FuncArgRead
+{
+	FUNC_ARG_READS_WHOLE,		/* the whole value */
+	FUNC_ARG_READS_STORED,		/* the stored form, not the value */
+	FUNC_ARG_READS_PART,		/* a slice or the size */
+	FUNC_ARG_READS_SIZE_FIRST,	/* the size, and the whole value if the sizes
+								 * match */
+} FuncArgRead;
+
 extern ExprState *ExecInitExprArg(Expr *node, PlanState *parent);
-extern List *ExecInitFuncArgList(List *args, Oid funcid, PlanState *parent);
-extern bool ExecFuncReadsStoredForm(Oid funcid);
-extern bool ExecFuncReadsSliceOrSize(Oid funcid);
+extern List *ExecInitFuncArgList(List *args, Oid funcid, Oid inputcollid,
+								 PlanState *parent);
+extern FuncArgRead ExecFuncArgRead(Oid funcid, List *args, int argno,
+								   Oid inputcollid);
 
 /* Hook for plugins to get control in ExecCheckPermissions() */
 typedef bool (*ExecutorCheckPerms_hook_type) (List *rangeTable,

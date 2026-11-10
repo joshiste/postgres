@@ -151,6 +151,109 @@ SELECT octet_length(txt), substr(txt, 1, 3), starts_with(txt, 'abc'), left(txt, 
          6403 | abc    | t           | abc
 (1 row)
 
+-- a slice or size reader takes the copy when the column has one and
+-- otherwise reads the stored datum, so it never detoasts the whole value
+-- itself; with the slice point attached, a NOTICE also marks each slice
+-- fetched from the toast table
+SELECT injection_points_attach('detoast-attr-slice-external', 'notice');
+ injection_points_attach 
+-------------------------
+ 
+(1 row)
+
+-- equality compares the sizes first: no detoast
+SELECT count(*) FROM sd WHERE txt = 'x' OR txt = 'y';
+ count 
+-------
+     0
+(1 row)
+
+-- and so does IN ahead of two full readers: no detoast
+SELECT CASE WHEN txt IN ('x', 'y') THEN length(txt) > 0 AND position('a6' in txt) > 0 ELSE false END FROM sd;
+ case 
+------
+ f
+(1 row)
+
+-- a size test that fails ahead of two full readers: no detoast
+SELECT CASE WHEN octet_length(txt) < 10 THEN length(txt) > 0 AND position('a6' in txt) > 0 ELSE false END FROM sd;
+ case 
+------
+ f
+(1 row)
+
+-- a slice test that fails ahead of two full readers: one slice, no detoast
+SELECT CASE WHEN left(txt, 3) = 'zzz' THEN length(txt) > 0 AND position('a6' in txt) > 0 ELSE false END FROM sd;
+NOTICE:  notice triggered for injection point detoast-attr-slice-external
+ case 
+------
+ f
+(1 row)
+
+-- a slice test that passes: one slice, then the full readers share one detoast
+SELECT CASE WHEN left(txt, 3) = 'abc' THEN length(txt) > 0 AND position('a6' in txt) > 0 ELSE false END FROM sd;
+NOTICE:  notice triggered for injection point detoast-attr-slice-external
+NOTICE:  notice triggered for injection point detoast-attr-external
+ case 
+------
+ t
+(1 row)
+
+-- full readers first: the slice and size readers after them take the copy,
+-- one detoast and no slice
+SELECT length(txt) > 0 AND position('a6' in txt) > 0 AND left(txt, 3) = 'abc' AND txt <> 'x' FROM sd;
+NOTICE:  notice triggered for injection point detoast-attr-external
+ ?column? 
+----------
+ t
+(1 row)
+
+-- equality between two columns, whose sizes match when the values do, and
+-- the whole readers below are not slice readers: each makes the copy for the
+-- readers after it, one detoast
+SELECT ctxt = ctxt AS eq, length(md5(ctxt)) FROM sd;
+NOTICE:  notice triggered for injection point detoast-attr-compressed
+ eq | length 
+----+--------
+ t  |     32
+(1 row)
+
+SELECT right(txt, 3), length(txt), position('a6' in txt) > 0 FROM sd;
+NOTICE:  notice triggered for injection point detoast-attr-external
+ right | length | ?column? 
+-------+--------+----------
+ 7a6   |   6403 | t
+(1 row)
+
+SELECT left(txt, -3) = 'x', length(txt), position('a6' in txt) > 0 FROM sd;
+NOTICE:  notice triggered for injection point detoast-attr-external
+ ?column? | length | ?column? 
+----------+--------+----------
+ f        |   6403 | t
+(1 row)
+
+-- starts_with() slices its first argument and reads its second whole
+SELECT starts_with(repeat('a', 7000), txt), length(txt), position('a6' in txt) > 0 FROM sd;
+NOTICE:  notice triggered for injection point detoast-attr-external
+ starts_with | length | ?column? 
+-------------+--------+----------
+ f           |   6403 | t
+(1 row)
+
+-- in FROM, through a nestloop parameter: one slice, no detoast
+SELECT s FROM sd, LATERAL substr(sd.txt, 1, 3) s;
+NOTICE:  notice triggered for injection point detoast-attr-slice-external
+  s  
+-----
+ abc
+(1 row)
+
+SELECT injection_points_detach('detoast-attr-slice-external');
+ injection_points_detach 
+-------------------------
+ 
+(1 row)
+
 -- a compressed inline value is decompressed once for two full readers
 SELECT length(md5(ctxt)), ctxt = ctxt FROM sd;
 NOTICE:  notice triggered for injection point detoast-attr-compressed
