@@ -117,6 +117,20 @@ struct TupleTableSlotOps;
 typedef struct TupleTableSlotOps TupleTableSlotOps;
 
 /* base tuple table slot type */
+/*
+ * A detoasted copy kept beside a slot, with the bytes of the stored datum it
+ * was made from, by which it is known to belong to the slot's current tuple;
+ * see slot_detoast_attr().
+ */
+typedef struct SlotDetoastedAttr
+{
+	Datum		copy;			/* the detoasted copy */
+	bool		owned;			/* is copy in this slot's tts_detoast_cxt,
+								 * rather than borrowed from another slot? */
+	Size		stored_size;	/* VARSIZE_ANY() of the stored datum */
+	char		stored[FLEXIBLE_ARRAY_MEMBER];	/* the stored datum */
+} SlotDetoastedAttr;
+
 typedef struct TupleTableSlot
 {
 	NodeTag		type;
@@ -142,17 +156,13 @@ typedef struct TupleTableSlot
 	MemoryContext tts_detoast_cxt;	/* holds tts_detoasted and the copies it
 									 * points to; created on demand, reset
 									 * whenever tts_values is invalidated */
-	Datum	   *tts_detoasted;	/* per attribute, a detoasted copy of the
-								 * tts_values entry, or 0; NULL until the
-								 * first copy of the current tuple is made.
-								 * tts_values itself always keeps the stored
-								 * datum. */
-#ifdef USE_ASSERT_CHECKING
-	Datum	   *tts_detoast_src;	/* the tts_values entry each copy was made
-									 * from, so that a copy outliving its
-									 * tuple can be caught; see
-									 * slot_detoast_attr() */
-#endif
+
+	/*
+	 * Per attribute, the detoasted copy of the tts_values entry, or NULL;
+	 * NULL until the first copy of the current tuple is made.  tts_values
+	 * itself always keeps the stored datum.
+	 */
+	SlotDetoastedAttr **tts_detoasted;
 	ItemPointerData tts_tid;	/* stored tuple's tid */
 	Oid			tts_tableOid;	/* table oid of tuple */
 } TupleTableSlot;

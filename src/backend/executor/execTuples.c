@@ -1863,9 +1863,6 @@ ExecResetSlotDetoastContext(TupleTableSlot *slot)
 {
 	MemoryContextReset(slot->tts_detoast_cxt);
 	slot->tts_detoasted = NULL;
-#ifdef USE_ASSERT_CHECKING
-	slot->tts_detoast_src = NULL;
-#endif
 }
 
 /* --------------------------------

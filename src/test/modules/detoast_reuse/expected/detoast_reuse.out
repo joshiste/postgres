@@ -1080,3 +1080,73 @@ WITH o AS MATERIALIZED (SELECT txt FROM hb) SELECT count(*) FROM o JOIN hb2 i ON
 
 RESET work_mem; RESET enable_nestloop; RESET enable_mergejoin;
 DROP TABLE hb, hb2;
+-- An extension's scan may refill its slot by writing tts_values in place,
+-- without ExecClearTuple() or ExecStore*(), which leaves the copies made for
+-- the previous row in place.  Each copy is checked against the bytes of the
+-- stored datum it was made from, so every row gets its own value, also when
+-- the new row's datum lands at the old one's address, through a projection,
+-- and in a slot whose borrowed copy has been freed; and a column marked by
+-- mistake that is not varlena is read as it is.
+CREATE EXTENSION detoast_reuse;
+CREATE TABLE rf (id int, txt text);
+ALTER TABLE rf ALTER COLUMN txt SET STORAGE EXTERNAL;
+INSERT INTO rf SELECT i, i || repeat(md5(i::text), 100) FROM generate_series(1, 3) i;
+SELECT r.n, md5(r.v) = md5(rf.txt) AS own_value
+FROM detoast_reuse_refill_in_place('SELECT id, txt FROM rf ORDER BY id', 2) WITH ORDINALITY r(v, n)
+JOIN rf ON rf.id = r.n ORDER BY r.n;
+ n | own_value 
+---+-----------
+ 1 | t
+ 2 | t
+ 3 | t
+(3 rows)
+
+SELECT r.n, md5(r.v) = md5(rf.txt) AS own_value
+FROM detoast_reuse_refill_in_place('SELECT id, txt FROM rf ORDER BY id', 2, 'project') WITH ORDINALITY r(v, n)
+JOIN rf ON rf.id = r.n ORDER BY r.n;
+ n | own_value 
+---+-----------
+ 1 | t
+ 2 | t
+ 3 | t
+(3 rows)
+
+SELECT r.n, md5(r.v) = md5(rf.txt) AS own_value
+FROM detoast_reuse_refill_in_place('SELECT id, txt FROM rf ORDER BY id', 2, 'same_address') WITH ORDINALITY r(v, n)
+JOIN rf ON rf.id = r.n ORDER BY r.n;
+ n | own_value 
+---+-----------
+ 1 | t
+ 2 | t
+ 3 | t
+(3 rows)
+
+SELECT r.n, md5(r.v) = md5(rf.txt) AS own_value
+FROM detoast_reuse_refill_in_place('SELECT id, txt FROM rf ORDER BY id', 2, 'project_same_address') WITH ORDINALITY r(v, n)
+JOIN rf ON rf.id = r.n ORDER BY r.n;
+ n | own_value 
+---+-----------
+ 1 | t
+ 2 | t
+ 3 | t
+(3 rows)
+
+SELECT r.n, md5(r.v) = md5(rf.txt) AS own_value
+FROM detoast_reuse_refill_in_place('SELECT id, txt FROM rf ORDER BY id', 2, 'result_refilled') WITH ORDINALITY r(v, n)
+JOIN rf ON rf.id = r.n ORDER BY r.n;
+ n | own_value 
+---+-----------
+ 1 | t
+ 2 | t
+ 3 | t
+(3 rows)
+
+SELECT * FROM detoast_reuse_refill_in_place('SELECT id, txt FROM rf ORDER BY id', 1);
+ detoast_reuse_refill_in_place 
+-------------------------------
+ 1
+ 2
+ 3
+(3 rows)
+
+DROP TABLE rf;

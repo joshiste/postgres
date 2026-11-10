@@ -78,6 +78,7 @@ static ExprState *ExecInitExprInternal(Expr *node, PlanState *parent,
 static bool ExecPushDetoastArgStep(Expr *expr, ExprState *state,
 								   Datum *resv, bool *resnull,
 								   bool existing_only);
+static bool ExecVarIsVarlena(PlanState *parent, Var *var);
 static inline void ExecInitDetoastArgExt(Expr *arg, ExprState *state,
 										 Datum *resv, bool *resnull,
 										 bool existing_only);
@@ -1255,6 +1256,14 @@ ExecPushDetoastArgStep(Expr *expr, ExprState *state, Datum *resv,
 		}
 		if (!bms_is_member(var->varattno, attrs))
 			return false;
+
+		/*
+		 * The planner marks only varlena columns, but a plan changed after
+		 * set_plan_references(), as some extensions do, need not keep to
+		 * that, and the step reads the datum as a pointer.
+		 */
+		if (!ExecVarIsVarlena(state->parent, var))
+			return false;
 		scratch.d.var.attnum = var->varattno - 1;
 		scratch.d.var.vartype = var->vartype;
 		scratch.d.var.existing_only = existing_only;
@@ -1263,6 +1272,44 @@ ExecPushDetoastArgStep(Expr *expr, ExprState *state, Datum *resv,
 	scratch.resnull = resnull;
 	ExprEvalPushStep(state, &scratch);
 	return true;
+}
+
+/*
+ * Whether var's type is a varlena type.  A plan can mark hundreds of
+ * references, so this asks the descriptor of the slot the Var will be read
+ * from when it has the attribute at the Var's type, as
+ * CheckVarSlotCompatibility() requires of the slot at run time anyway, and
+ * the catalog only otherwise.
+ */
+static bool
+ExecVarIsVarlena(PlanState *parent, Var *var)
+{
+	TupleDesc	desc = NULL;
+
+	switch (var->varno)
+	{
+		case INNER_VAR:
+			if (innerPlanState(parent) != NULL)
+				desc = ExecGetResultType(innerPlanState(parent));
+			break;
+		case OUTER_VAR:
+			if (outerPlanState(parent) != NULL)
+				desc = ExecGetResultType(outerPlanState(parent));
+			break;
+		default:
+			desc = parent->scandesc;
+			break;
+	}
+
+	if (desc != NULL && var->varattno <= desc->natts)
+	{
+		Form_pg_attribute attr = TupleDescAttr(desc, var->varattno - 1);
+
+		if (attr->atttypid == var->vartype)
+			return attr->attlen == -1;
+	}
+
+	return get_typlen(var->vartype) == -1;
 }
 
 /*

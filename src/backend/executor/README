@@ -339,7 +339,12 @@ result slot therefore drops the copy rather than taking ownership of it, since
 a materialized slot may outlive its source.  A PARAM_EXEC parameter carries a
 reference to the slot and attribute its value came from rather than a pointer
 to the copy, and that reference is followed only while the slot still holds
-the same datum.
+the same datum.  Code outside the slot implementation can still refill
+tts_values in place, without ExecClearTuple() or ExecStore*(), as an
+extension's scan node may, and may put the new datum where the old one was;
+so each copy also keeps the bytes of the stored datum it was made from, and a
+copy whose stored datum differs from the slot's is replaced rather than
+handed out or carried.
 
 The planner decides only where this pays, in set_plan_detoast_reuse() in
 setrefs.c, which records per node the attributes two or more argument

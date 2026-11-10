@@ -5761,6 +5761,79 @@ ExecEvalWholeRowVar(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
 }
 
 /*
+ * Whether d, the record of a copy of the slot's attnum'th value, was made
+ * from the value the slot holds now.  The copy is handed out only then:
+ * handing out a copy made for an earlier tuple is the one way this mechanism
+ * can produce a wrong answer.  resets_detoasted makes the slot implementation
+ * drop the copies whenever it refills the slot, but code outside it can
+ * refill tts_values in place without going through ExecClearTuple() or
+ * ExecStore*(), as an extension's scan node may, and nothing keeps it from
+ * putting the new datum where the old one was.  So the stored datum is
+ * compared byte for byte, which is exact: a toast pointer identifies its
+ * value, and an inline compressed datum is the value.  Both are small, a few
+ * bytes for a pointer and less than a page for an inline datum.
+ */
+static inline bool
+slot_detoasted_current(TupleTableSlot *slot, int attnum, SlotDetoastedAttr *d)
+{
+	varlena    *stored = (varlena *) DatumGetPointer(slot->tts_values[attnum]);
+
+	return !slot->tts_isnull[attnum] &&
+		VARSIZE_ANY(stored) == d->stored_size &&
+		memcmp(stored, d->stored, d->stored_size) == 0;
+}
+
+/* The record of the copy of the slot's current attnum'th value, or NULL */
+static inline SlotDetoastedAttr *
+slot_detoasted_get(TupleTableSlot *slot, int attnum)
+{
+	SlotDetoastedAttr *d;
+
+	if (slot->tts_detoasted == NULL)
+		return NULL;
+	d = slot->tts_detoasted[attnum];
+	if (d == NULL || !slot_detoasted_current(slot, attnum, d))
+		return NULL;
+	return d;
+}
+
+/* Make sure the slot has a detoast context and a tts_detoasted array */
+static void
+slot_detoast_prepare(TupleTableSlot *slot)
+{
+	if (unlikely(slot->tts_detoast_cxt == NULL))
+		slot->tts_detoast_cxt =
+			GenerationContextCreate(slot->tts_mcxt,
+									"detoasted slot values",
+									ALLOCSET_DEFAULT_SIZES);
+	if (slot->tts_detoasted == NULL)
+		slot->tts_detoasted =
+			MemoryContextAllocZero(slot->tts_detoast_cxt,
+								   slot->tts_tupleDescriptor->natts *
+								   sizeof(SlotDetoastedAttr *));
+}
+
+/*
+ * Record copy as the detoasted copy of the slot's current attnum'th value;
+ * owned says whether it is in the slot's own detoast context.
+ */
+static void
+slot_detoasted_set(TupleTableSlot *slot, int attnum, Datum copy, bool owned)
+{
+	varlena    *stored = (varlena *) DatumGetPointer(slot->tts_values[attnum]);
+	Size		size = VARSIZE_ANY(stored);
+	SlotDetoastedAttr *d;
+
+	d = MemoryContextAlloc(slot->tts_detoast_cxt,
+						   offsetof(SlotDetoastedAttr, stored) + size);
+	d->copy = copy;
+	d->owned = owned;
+	d->stored_size = size;
+	memcpy(d->stored, stored, size);
+	slot->tts_detoasted[attnum] = d;
+}
+
+/*
  * The detoasted copy of the slot's attnum'th value, made on first use.
  *
  * This detoasts unconditionally rather than rechecking, so the caller is
@@ -5778,6 +5851,10 @@ ExecEvalWholeRowVar(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
 static Datum
 slot_detoast_attr(TupleTableSlot *slot, int attnum, varlena *attr)
 {
+	SlotDetoastedAttr *d;
+	Datum		copy;
+	MemoryContext oldcxt;
+
 	Assert(attnum >= 0 && attnum < slot->tts_nvalid);
 	Assert(!slot->tts_isnull[attnum]);
 	Assert(PointerGetDatum(attr) == slot->tts_values[attnum]);
@@ -5786,47 +5863,30 @@ slot_detoast_attr(TupleTableSlot *slot, int attnum, varlena *attr)
 	if (!slot->tts_ops->resets_detoasted)
 		return PointerGetDatum(detoast_attr(attr));
 
-	if (unlikely(slot->tts_detoast_cxt == NULL))
-		slot->tts_detoast_cxt =
-			GenerationContextCreate(slot->tts_mcxt,
-									"detoasted slot values",
-									ALLOCSET_DEFAULT_SIZES);
-	if (slot->tts_detoasted == NULL)
+	d = slot->tts_detoasted ? slot->tts_detoasted[attnum] : NULL;
+	if (d != NULL)
 	{
-		slot->tts_detoasted =
-			MemoryContextAllocZero(slot->tts_detoast_cxt,
-								   slot->tts_tupleDescriptor->natts *
-								   sizeof(Datum));
-#ifdef USE_ASSERT_CHECKING
-		slot->tts_detoast_src =
-			MemoryContextAllocZero(slot->tts_detoast_cxt,
-								   slot->tts_tupleDescriptor->natts *
-								   sizeof(Datum));
-#endif
-	}
-	if (slot->tts_detoasted[attnum] == (Datum) 0)
-	{
-		MemoryContext oldcxt = MemoryContextSwitchTo(slot->tts_detoast_cxt);
+		if (likely(slot_detoasted_current(slot, attnum, d)))
+			return d->copy;
 
-		slot->tts_detoasted[attnum] = PointerGetDatum(detoast_attr(attr));
-		MemoryContextSwitchTo(oldcxt);
-#ifdef USE_ASSERT_CHECKING
-		slot->tts_detoast_src[attnum] = slot->tts_values[attnum];
-#endif
+		/*
+		 * The copy was made for an earlier tuple.  Only this attribute's copy
+		 * is known to be stale; the others may already have been handed out
+		 * for the current tuple, so the context is not reset.
+		 */
+		if (d->owned)
+			pfree(DatumGetPointer(d->copy));
+		pfree(d);
+		slot->tts_detoasted[attnum] = NULL;
 	}
 
-	/*
-	 * Handing out a copy made for an earlier tuple is the one way this
-	 * mechanism can produce a wrong answer, and it is what resets_detoasted
-	 * exists to prevent.  Check the promise where we can: the stored datum
-	 * must still be the one the copy was made from.  An address can be
-	 * reused, so this does not prove a reset happened, but it catches a slot
-	 * refilled without the copies being dropped, which is the mistake an
-	 * implementation actually makes.
-	 */
-	Assert(slot->tts_detoast_src[attnum] == slot->tts_values[attnum]);
+	slot_detoast_prepare(slot);
+	oldcxt = MemoryContextSwitchTo(slot->tts_detoast_cxt);
+	copy = PointerGetDatum(detoast_attr(attr));
+	MemoryContextSwitchTo(oldcxt);
+	slot_detoasted_set(slot, attnum, copy, true);
 
-	return slot->tts_detoasted[attnum];
+	return copy;
 }
 
 /*
@@ -5838,16 +5898,13 @@ slot_detoast_attr(TupleTableSlot *slot, int attnum, varlena *attr)
 static Datum
 slot_detoast_attr_existing(TupleTableSlot *slot, int attnum)
 {
+	SlotDetoastedAttr *d;
+
 	Assert(attnum >= 0 && attnum < slot->tts_nvalid);
 	Assert(!slot->tts_isnull[attnum]);
 
-	if (slot->tts_detoasted == NULL || slot->tts_detoasted[attnum] == (Datum) 0)
-		return slot->tts_values[attnum];
-
-	/* see slot_detoast_attr() */
-	Assert(slot->tts_detoast_src[attnum] == slot->tts_values[attnum]);
-
-	return slot->tts_detoasted[attnum];
+	d = slot_detoasted_get(slot, attnum);
+	return d ? d->copy : slot->tts_values[attnum];
 }
 
 /*
@@ -5904,6 +5961,7 @@ ExecEvalAssignVarDetoast(ExprState *state, ExprEvalStep *op,
 	TupleTableSlot *resultslot = state->resultslot;
 	int			resultnum = op->d.assign_var.resultnum;
 	int			attnum = op->d.assign_var.attnum;
+	SlotDetoastedAttr *d;
 
 	Assert(attnum >= 0 && attnum < slot->tts_nvalid);
 	Assert(resultnum >= 0 && resultnum < resultslot->tts_tupleDescriptor->natts);
@@ -5911,27 +5969,16 @@ ExecEvalAssignVarDetoast(ExprState *state, ExprEvalStep *op,
 	resultslot->tts_values[resultnum] = slot->tts_values[attnum];
 	resultslot->tts_isnull[resultnum] = slot->tts_isnull[attnum];
 
-	if (slot->tts_detoasted != NULL && slot->tts_detoasted[attnum] != (Datum) 0)
+	/*
+	 * A copy made for an earlier tuple is not carried.  The result slot
+	 * records the borrowed copy with the stored datum's bytes of its own,
+	 * since the source's record goes when the source slot is cleared.
+	 */
+	d = slot_detoasted_get(slot, attnum);
+	if (d != NULL)
 	{
-		if (unlikely(resultslot->tts_detoast_cxt == NULL))
-			resultslot->tts_detoast_cxt =
-				GenerationContextCreate(resultslot->tts_mcxt,
-										"detoasted slot values",
-										ALLOCSET_DEFAULT_SIZES);
-		if (resultslot->tts_detoasted == NULL)
-			resultslot->tts_detoasted =
-				MemoryContextAllocZero(resultslot->tts_detoast_cxt,
-									   resultslot->tts_tupleDescriptor->natts *
-									   sizeof(Datum));
-		resultslot->tts_detoasted[resultnum] = slot->tts_detoasted[attnum];
-#ifdef USE_ASSERT_CHECKING
-		if (resultslot->tts_detoast_src == NULL)
-			resultslot->tts_detoast_src =
-				MemoryContextAllocZero(resultslot->tts_detoast_cxt,
-									   resultslot->tts_tupleDescriptor->natts *
-									   sizeof(Datum));
-		resultslot->tts_detoast_src[resultnum] = resultslot->tts_values[resultnum];
-#endif
+		slot_detoast_prepare(resultslot);
+		slot_detoasted_set(resultslot, resultnum, d->copy, false);
 	}
 }
 

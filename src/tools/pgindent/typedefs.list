@@ -2914,6 +2914,7 @@ SkipSupportIncDec
 SlabBlock
 SlabContext
 SlabSlot
+SlotDetoastedAttr
 SlotInvalidationCauseMap
 SlotNumber
 SlotSyncCtxStruct
