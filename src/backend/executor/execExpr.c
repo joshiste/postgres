@@ -158,8 +158,9 @@ ExecInitExpr(Expr *node, PlanState *parent)
 /*
  * As ExecInitExpr, for an expression whose result the caller consumes without
  * returning it, so that the whole expression is an argument position in the
- * sense of ExecInitDetoastArg().  Merge clause sides and the arguments of a
- * set-returning function call are compiled this way.
+ * sense of ExecInitDetoastArg().  Merge clause sides are compiled this way,
+ * and through ExecInitFuncArgList() the arguments of a function called in
+ * FROM or returning a set.
  */
 ExprState *
 ExecInitExprArg(Expr *node, PlanState *parent)
@@ -168,16 +169,20 @@ ExecInitExprArg(Expr *node, PlanState *parent)
 }
 
 /*
- * Call ExecInitExprArg() on a list of expressions, return a list of
- * ExprStates.
+ * Prepare the arguments of a call to funcid that execSRF.c evaluates itself,
+ * returning a list of ExprStates.  As in ExecInitFunc(), each is an argument
+ * position unless the function reads the stored form.
  */
 List *
-ExecInitExprArgList(List *nodes, PlanState *parent)
+ExecInitFuncArgList(List *args, Oid funcid, PlanState *parent)
 {
 	List	   *result = NIL;
 	ListCell   *lc;
 
-	foreach(lc, nodes)
+	if (ExecFuncReadsStoredForm(funcid))
+		return ExecInitExprList(args, parent);
+
+	foreach(lc, args)
 	{
 		Expr	   *e = lfirst(lc);
 
@@ -973,7 +978,9 @@ ExecCheck(ExprState *state, ExprContext *econtext)
 
 /*
  * Functions whose result depends on how the argument is stored rather than on
- * its value, and which must therefore receive the stored datum.
+ * its value, and which must therefore receive the stored datum.  Asked by
+ * ExecInitFunc() and ExecInitFuncArgList(); the executor README says why the
+ * other positions that call a function need not ask.
  */
 bool
 ExecFuncReadsStoredForm(Oid funcid)
@@ -1434,7 +1441,7 @@ ExecInitExprRec(Expr *node, ExprState *state,
 
 				ExecInitFunc(&scratch, node,
 							 func->args, func->funcid, func->inputcollid,
-							 state, !ExecFuncReadsStoredForm(func->funcid));
+							 state, true);
 				ExprEvalPushStep(state, &scratch);
 				break;
 			}
@@ -2952,6 +2959,9 @@ ExecInitFunc(ExprEvalStep *scratch, Expr *node, List *args, Oid funcid,
 	if (aclresult != ACLCHECK_OK)
 		aclcheck_error(aclresult, OBJECT_FUNCTION, get_func_name(funcid));
 	InvokeFunctionExecuteHook(funcid);
+
+	if (ExecFuncReadsStoredForm(funcid))
+		detoast_args = false;
 
 	/*
 	 * Safety check on nargs.  Under normal circumstances this should never

@@ -69,6 +69,17 @@ SELECT doc->'a'->'x', doc->'a'->'y' FROM sd;
 -- other references share: one detoast, stored sizes reported
 SELECT pg_column_size(doc) > 8192 AS stored_size, pg_column_compression(doc) IS NULL AS uncompressed,
        doc->'a', doc->'b' FROM sd;
+-- the same functions called in FROM, where the arguments are compiled for a
+-- table function: no detoast, stored form reported
+SELECT s < 50000 AS stored_size, c AS compression, t IS NOT NULL AS pointer_kept
+FROM sd, LATERAL pg_column_size(sd.ctxt) s, LATERAL pg_column_compression(sd.ctxt) c,
+     LATERAL pg_column_toast_chunk_id(sd.doc) t;
+-- and when other references have made copies of both columns: one detoast
+-- each, stored form still reported
+SELECT s < 50000 AS stored_size, c AS compression, t IS NOT NULL AS pointer_kept
+FROM sd, LATERAL pg_column_size(sd.ctxt) s, LATERAL pg_column_compression(sd.ctxt) c,
+     LATERAL pg_column_toast_chunk_id(sd.doc) t
+WHERE sd.doc ? 'a' AND sd.doc ? 'b' AND sd.ctxt LIKE 'x%' AND sd.ctxt LIKE '%x';
 -- slice and size readers do not count as detoasting references: no detoast at all
 SELECT octet_length(txt), substr(txt, 1, 3), starts_with(txt, 'abc'), left(txt, 3) FROM sd;
 -- a compressed inline value is decompressed once for two full readers

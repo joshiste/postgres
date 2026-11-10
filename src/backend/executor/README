@@ -310,7 +310,12 @@ copy pays.
   where a copy pays, so if the two drift apart an attribute is marked and
   unused, or a sharing opportunity is missed.
 - Functions that must receive the stored representation because their result
-depends on it: ExecFuncReadsStoredForm() in execExpr.c.
+  depends on it: ExecFuncReadsStoredForm() in execExpr.c, asked by
+  ExecInitFunc() and ExecInitFuncArgList(), which between them compile the
+  arguments of every FuncExpr and OpExpr, including a function called in
+  FROM.  The remaining positions that call a function (ScalarArrayOpExpr,
+  RowCompareExpr, hash keys) call comparison or hash support functions,
+  which by contract depend only on the value.
 - Functions that read only a slice or the size of their argument, which the
   planner does not count as references worth sharing:
   ExecFuncReadsSliceOrSize() in execExpr.c.  A column shared for other
