@@ -32,6 +32,7 @@
 #include "libpq/pqformat.h"
 #include "miscadmin.h"
 #include "nodes/execnodes.h"
+#include "nodes/supportnodes.h"
 #include "parser/scansup.h"
 #include "port/pg_bswap.h"
 #include "regex/regex.h"
@@ -5832,4 +5833,131 @@ invalid_pair:
 			(errcode(ERRCODE_SYNTAX_ERROR),
 			 errmsg("invalid Unicode surrogate pair")));
 	PG_RETURN_NULL();			/* keep compiler quiet */
+}
+
+
+/*
+ * Planner support functions that say how the functions of this file and
+ * its relatives read a varlena argument (see SupportRequestArgRead).
+ */
+
+/*
+ * For functions whose result depends on how an argument is stored, and for
+ * ones that do not look at the value of any argument.
+ */
+Datum
+varlena_stored_support(PG_FUNCTION_ARGS)
+{
+	Node	   *rawreq = (Node *) PG_GETARG_POINTER(0);
+	Node	   *ret = NULL;
+
+	if (IsA(rawreq, SupportRequestArgRead))
+	{
+		SupportRequestArgRead *req = (SupportRequestArgRead *) rawreq;
+
+		req->read = FUNC_ARG_READS_STORED;
+		ret = (Node *) req;
+	}
+
+	PG_RETURN_POINTER(ret);
+}
+
+/*
+ * For functions that read a slice of their first argument or only its size.
+ */
+Datum
+varlena_slice_support(PG_FUNCTION_ARGS)
+{
+	Node	   *rawreq = (Node *) PG_GETARG_POINTER(0);
+	Node	   *ret = NULL;
+
+	if (IsA(rawreq, SupportRequestArgRead))
+	{
+		SupportRequestArgRead *req = (SupportRequestArgRead *) rawreq;
+
+		if (req->argno == 0)
+		{
+			req->read = FUNC_ARG_READS_PART;
+			ret = (Node *) req;
+		}
+	}
+
+	PG_RETURN_POINTER(ret);
+}
+
+/*
+ * left() reads a slice, unless the count is negative or not known: counting
+ * from the end takes the whole value.
+ */
+Datum
+text_left_support(PG_FUNCTION_ARGS)
+{
+	Node	   *rawreq = (Node *) PG_GETARG_POINTER(0);
+	Node	   *ret = NULL;
+
+	if (IsA(rawreq, SupportRequestArgRead))
+	{
+		SupportRequestArgRead *req = (SupportRequestArgRead *) rawreq;
+		Node	   *n = list_length(req->args) > 1 ? lsecond(req->args) : NULL;
+
+		if (req->argno == 0 &&
+			!(n != NULL && IsA(n, Const) &&
+			  !((Const *) n)->constisnull &&
+			  DatumGetInt32(((Const *) n)->constvalue) < 0))
+		{
+			req->read = FUNC_ARG_READS_PART;
+			ret = (Node *) req;
+		}
+	}
+
+	PG_RETURN_POINTER(ret);
+}
+
+/*
+ * The length in characters is the size in a single-byte encoding; in a
+ * multibyte one the characters have to be counted.
+ */
+Datum
+textlen_support(PG_FUNCTION_ARGS)
+{
+	Node	   *rawreq = (Node *) PG_GETARG_POINTER(0);
+	Node	   *ret = NULL;
+
+	if (IsA(rawreq, SupportRequestArgRead))
+	{
+		SupportRequestArgRead *req = (SupportRequestArgRead *) rawreq;
+
+		if (pg_database_encoding_max_length() == 1)
+		{
+			req->read = FUNC_ARG_READS_PART;
+			ret = (Node *) req;
+		}
+	}
+
+	PG_RETURN_POINTER(ret);
+}
+
+/*
+ * Equality and inequality of text under a deterministic collation, and of
+ * bytea, compare the sizes before anything else.
+ */
+Datum
+varlena_eq_support(PG_FUNCTION_ARGS)
+{
+	Node	   *rawreq = (Node *) PG_GETARG_POINTER(0);
+	Node	   *ret = NULL;
+
+	if (IsA(rawreq, SupportRequestArgRead))
+	{
+		SupportRequestArgRead *req = (SupportRequestArgRead *) rawreq;
+
+		if (!OidIsValid(req->inputcollid) ||
+			get_collation_isdeterministic(req->inputcollid))
+		{
+			req->read = FUNC_ARG_READS_SIZE_FIRST;
+			ret = (Node *) req;
+		}
+	}
+
+	PG_RETURN_POINTER(ret);
 }

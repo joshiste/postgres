@@ -445,4 +445,61 @@ typedef struct SupportRequestModifyInPlace
 	int			paramid;		/* ID of Param(s) representing variable */
 } SupportRequestModifyInPlace;
 
+/* How a function reads one of its arguments */
+typedef enum FuncArgRead
+{
+	FUNC_ARG_READS_WHOLE,		/* the whole value */
+	FUNC_ARG_READS_STORED,		/* the stored form, or nothing of the value */
+	FUNC_ARG_READS_PART,		/* a slice or the size */
+	FUNC_ARG_READS_SIZE_FIRST,	/* the size, and the whole value if the sizes
+								 * match */
+} FuncArgRead;
+
+/*
+ * The ArgRead request lets a support function say how its target function
+ * reads an argument of a varlena type.  When an expression refers to a
+ * toasted column more than once, the executor detoasts the column once per
+ * row and hands the copy to every reference, unless told here that the
+ * function does not want it:
+ *
+ * FUNC_ARG_READS_WHOLE: the function detoasts the argument.  This is assumed
+ * of a function without a support function, or whose support function does
+ * not answer the request.
+ *
+ * FUNC_ARG_READS_STORED: the result depends on how the argument is stored
+ * (as with pg_column_size()), or the function does not look at the value at
+ * all.  The function always receives the stored datum.
+ *
+ * FUNC_ARG_READS_PART: the function reads only a slice of the argument or
+ * its size (pg_detoast_datum_slice(), toast_raw_datum_size()), which is
+ * cheaper than detoasting it.  No copy is made on its behalf; it receives one
+ * only if another reference has made it already.
+ *
+ * FUNC_ARG_READS_SIZE_FIRST: the function compares the sizes of its two
+ * arguments, both of varlena types, and detoasts them only when the sizes
+ * are equal.  A copy is made only in that case.
+ *
+ * Only FUNC_ARG_READS_STORED affects what the function computes.  The other
+ * answers decide how often a value is detoasted, so a function for which
+ * none is always true should give the answer that is true of the call at
+ * hand, or else not answer.
+ *
+ * "funcid", "args" and "inputcollid" describe the call, and "argno" is the
+ * zero-based position of the argument asked about.  "args" can hold more
+ * entries than the function has parameters when it is variadic.  The support
+ * function sets "read" and returns the request node, or returns NULL to have
+ * the default assumed.
+ */
+typedef struct SupportRequestArgRead
+{
+	NodeTag		type;
+
+	Oid			funcid;			/* PG_PROC OID of the target function */
+	List	   *args;			/* Arguments to the function */
+	Oid			inputcollid;	/* Input collation of the call */
+	int			argno;			/* Argument asked about */
+
+	FuncArgRead read;			/* Output: how that argument is read */
+} SupportRequestArgRead;
+
 #endif							/* SUPPORTNODES_H */

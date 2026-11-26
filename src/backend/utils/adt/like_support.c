@@ -142,6 +142,17 @@ text_starts_with_support(PG_FUNCTION_ARGS)
 {
 	Node	   *rawreq = (Node *) PG_GETARG_POINTER(0);
 
+	/* starts_with() reads no more of the string than the prefix is long */
+	if (IsA(rawreq, SupportRequestArgRead))
+	{
+		SupportRequestArgRead *req = (SupportRequestArgRead *) rawreq;
+
+		if (req->argno != 0)
+			PG_RETURN_POINTER(NULL);
+		req->read = FUNC_ARG_READS_PART;
+		PG_RETURN_POINTER(req);
+	}
+
 	PG_RETURN_POINTER(like_regex_support(rawreq, Pattern_Type_Prefix));
 }
 
