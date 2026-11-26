@@ -354,6 +354,18 @@ where the old one was; so each copy also keeps the bytes of the stored datum
 it was made from, and a copy whose stored datum differs from the slot's is
 replaced rather than handed out or carried.
 
+The planner decides only where this pays, in set_plan_detoast_reuse() in
+setrefs.c, which records per node the attributes two or more argument
+positions read, and marks a single reference where the node re-evaluates its
+expressions against an unchanging tuple, such as the outer side of a join.
+References are counted across one node boundary as well as within a node: if a
+scan reads a column once and the node directly above it reads that column once
+as well, the column is marked on both.  The counting reaches no further, so a
+reference above an intervening join is neither counted nor shared; reaching
+further would mean marking the column on every node in between and carrying
+the copy up through each of their projections.  Nothing about those sets
+affects results: a wrong decision costs a detoast, never correctness.
+
 Memory Management
 -----------------
 
