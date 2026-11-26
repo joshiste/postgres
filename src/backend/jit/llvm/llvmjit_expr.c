@@ -1224,6 +1224,12 @@ llvm_compile_expr(ExprState *state)
 					break;
 				}
 
+			case EEOP_PARAM_EXEC_DETOAST:
+				build_EvalXFunc(b, mod, "ExecEvalParamExecDetoast",
+								v_state, op, v_econtext);
+				LLVMBuildBr(b, opblocks[opno + 1]);
+				break;
+
 			case EEOP_DETOAST_SAME_SIZE_ARGS:
 				build_EvalXFunc(b, mod, "ExecEvalDetoastSameSizeArgs",
 								v_state, op, v_econtext);

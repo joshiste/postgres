@@ -1036,8 +1036,9 @@ ExecFuncArgRead(Oid funcid, List *args, int argno, Oid inputcollid)
 /*
  * Prepare evaluation of an argument whose whole value the consuming step
  * reads.  A Var can have a copy to hand out when its own node detoasts
- * something once per row; everything else, the common case, is
- * ExecInitExprRec without further ado.
+ * something once per row, a PARAM_EXEC parameter when any node of the plan
+ * does, since the copy it finds was made elsewhere; everything else, the
+ * common case, is ExecInitExprRec without further ado.
  */
 static inline void
 ExecInitDetoastArg(Expr *arg, ExprState *state, Datum *resv, bool *resnull)
@@ -1057,6 +1058,7 @@ ExecInitDetoastArgExt(Expr *arg, ExprState *state, Datum *resv, bool *resnull,
 	PlanState  *parent = state->parent;
 	Expr	   *expr = arg;
 	Plan	   *plan;
+	PlannedStmt *pstmt;
 
 	/*
 	 * Expressions outside a plan tree, and the ones COPY compiles against a
@@ -1068,13 +1070,16 @@ ExecInitDetoastArgExt(Expr *arg, ExprState *state, Datum *resv, bool *resnull,
 		return;
 	}
 	plan = parent->plan;
+	pstmt = parent->state ? parent->state->es_plannedstmt : NULL;
 
 	while (IsA(expr, RelabelType))
 		expr = ((RelabelType *) expr)->arg;
-	if (!(IsA(expr, Var) && plan != NULL &&
-		  (plan->detoast_reuse_scan != NULL ||
-		   plan->detoast_reuse_outer != NULL ||
-		   plan->detoast_reuse_inner != NULL)) ||
+	if (!((IsA(expr, Param) && ((Param *) expr)->paramkind == PARAM_EXEC &&
+		   pstmt != NULL && pstmt->detoastReuse) ||
+		  (IsA(expr, Var) && plan != NULL &&
+		   (plan->detoast_reuse_scan != NULL ||
+			plan->detoast_reuse_outer != NULL ||
+			plan->detoast_reuse_inner != NULL))) ||
 		!ExecPushDetoastArgStep(expr, state, resv, resnull, existing_only))
 		ExecInitExprRec(arg, state, resv, resnull);
 }
@@ -1107,27 +1112,45 @@ ExecInitFuncArg(Expr *arg, ExprState *state, Datum *resv, bool *resnull,
  * Out-of-line part of ExecInitDetoastArg: push the step that hands out the
  * detoasted copy if the argument qualifies, and say whether it did.  A plain
  * Var of an attribute the node detoasts once per row becomes the
- * corresponding EEOP_*_VAR_DETOAST step.  Everything else, and every Var in
- * any other position, goes through ExecInitExprRec and sees the stored datum.
- * Restricting the steps to argument positions is what keeps a detoasted copy
- * from ever becoming an expression result: the constructs that return an
- * input unchanged (bare Vars, RelabelType, CASE, COALESCE, GREATEST/LEAST,
- * NULLIF) never get one.
+ * corresponding EEOP_*_VAR_DETOAST step; a varlena PARAM_EXEC parameter becomes
+ * EEOP_PARAM_EXEC_DETOAST, which does the same for a parameter set from a slot
+ * column.  Everything else, and every Var or Param in any other position,
+ * goes through ExecInitExprRec and sees the stored datum.  Restricting the
+ * steps to argument positions is what keeps a detoasted copy from ever
+ * becoming an expression result: the constructs that return an input
+ * unchanged (bare Vars, RelabelType, CASE, COALESCE, GREATEST/LEAST, NULLIF)
+ * never get one.
  */
 static bool
 ExecPushDetoastArgStep(Expr *expr, ExprState *state, Datum *resv,
 					   bool *resnull, bool existing_only)
 {
 	ExprEvalStep scratch = {0};
-	Var		   *var = (Var *) expr;
-	ExprEvalOp	opcode;
 
-	if (!ExecVarDetoastOpcode(state, var, &opcode))
-		return false;
-	scratch.opcode = opcode;
-	scratch.d.var.attnum = var->varattno - 1;
-	scratch.d.var.vartype = var->vartype;
-	scratch.d.var.existing_only = existing_only;
+	if (IsA(expr, Param))
+	{
+		Param	   *param = (Param *) expr;
+
+		if (param->paramkind != PARAM_EXEC ||
+			get_typlen(param->paramtype) != -1)
+			return false;
+		scratch.opcode = EEOP_PARAM_EXEC_DETOAST;
+		scratch.d.param.paramid = param->paramid;
+		scratch.d.param.paramtype = param->paramtype;
+		scratch.d.param.existing_only = existing_only;
+	}
+	else
+	{
+		Var		   *var = (Var *) expr;
+		ExprEvalOp	opcode;
+
+		if (!ExecVarDetoastOpcode(state, var, &opcode))
+			return false;
+		scratch.opcode = opcode;
+		scratch.d.var.attnum = var->varattno - 1;
+		scratch.d.var.vartype = var->vartype;
+		scratch.d.var.existing_only = existing_only;
+	}
 	scratch.resvalue = resv;
 	scratch.resnull = resnull;
 	ExprEvalPushStep(state, &scratch);
@@ -1175,7 +1198,9 @@ ExecVarDetoastOpcode(ExprState *state, Var *var, ExprEvalOp *opcode)
 /*
  * After the argument steps of a call to a size-first comparison, push the
  * step that makes the copy of a marked column when the two sizes match (see
- * ExecEvalDetoastSameSizeArgs()), if either argument is such a column.
+ * ExecEvalDetoastSameSizeArgs()), if either argument is such a column.  A
+ * PARAM_EXEC argument is left to its own step, which hands out a copy made
+ * elsewhere.
  */
 static void
 ExecPushDetoastSameSizeStep(ExprState *state, List *args,
@@ -3242,6 +3267,7 @@ ExecInitSubPlanExpr(SubPlan *subplan,
 	{
 		int			paramid = lfirst_int(l);
 		Expr	   *arg = (Expr *) lfirst(pvar);
+		Expr	   *src = arg;
 
 		ExecInitExprRec(arg, state, resv, resnull);
 
@@ -3251,6 +3277,22 @@ ExecInitSubPlanExpr(SubPlan *subplan,
 		scratch.d.param.paramid = paramid;
 		/* paramtype's not actually used, but we might as well fill it */
 		scratch.d.param.paramtype = exprType((Node *) arg);
+
+		/*
+		 * A plain column value may have a detoasted copy beside its slot;
+		 * tell the step where, so that argument positions in the subplan can
+		 * use it (see ExecEvalParamExecDetoast).
+		 */
+		scratch.d.param.srcattnum = 0;
+		scratch.d.param.srcvarno = 0;
+		while (IsA(src, RelabelType))
+			src = ((RelabelType *) src)->arg;
+		if (IsA(src, Var) && ((Var *) src)->varattno > 0 &&
+			((Var *) src)->varreturningtype == VAR_RETURNING_DEFAULT)
+		{
+			scratch.d.param.srcattnum = ((Var *) src)->varattno;
+			scratch.d.param.srcvarno = ((Var *) src)->varno;
+		}
 		ExprEvalPushStep(state, &scratch);
 	}
 
