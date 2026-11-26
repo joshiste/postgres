@@ -1,0 +1,8 @@
+-- Equality under a nondeterministic collation compares the whole values
+-- rather than their sizes first, so it is not treated as reading only the
+-- size: it makes the copy for the readers after it.
+SELECT getdatabaseencoding() <> 'UTF8' OR
+       (SELECT count(*) FROM pg_collation WHERE collprovider = 'i' AND collname <> 'unicode') = 0
+       AS skip_test \gset
+\if :skip_test
+\quit

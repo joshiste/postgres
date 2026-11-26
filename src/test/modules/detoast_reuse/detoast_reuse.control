@@ -1,0 +1,4 @@
+comment = 'Test code for detoasting a column once per row'
+default_version = '1.0'
+module_pathname = '$libdir/detoast_reuse'
+relocatable = true
