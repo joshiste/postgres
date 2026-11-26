@@ -184,6 +184,14 @@ tts_virtual_materialize(TupleTableSlot *slot)
 	if (TTS_SHOULDFREE(slot))
 		return;
 
+	/*
+	 * Detoasted copies carried in from another slot (see
+	 * ExecEvalAssignVarDetoast) point into that slot, which a materialized
+	 * slot may outlive.  Drop them along with the slot's own copies; they are
+	 * recreated on demand.
+	 */
+	ExecSlotResetDetoast(slot);
+
 	/* compute size of memory required */
 	for (int natt = 0; natt < desc->natts; natt++)
 	{
@@ -406,6 +414,9 @@ tts_heap_materialize(TupleTableSlot *slot)
 	HeapTupleTableSlot *hslot = (HeapTupleTableSlot *) slot;
 	MemoryContext oldContext;
 
+	/* see tts_virtual_materialize: carried detoasted copies must go */
+	ExecSlotResetDetoast(slot);
+
 	Assert(!TTS_EMPTY(slot));
 
 	/* If slot has its tuple already materialized, nothing to do. */
@@ -500,6 +511,9 @@ tts_heap_store_tuple(TupleTableSlot *slot, HeapTuple tuple, bool shouldFree)
 	 */
 	if (HeapTupleHeaderIsVersionedDatum(tuple->t_data))
 		heap_datum_check(tuple->t_data, slot->tts_tupleDescriptor);
+
+	/* the slot moves on to another tuple; drop its detoasted copies */
+	ExecSlotResetDetoast(slot);
 
 	tts_heap_clear(slot);
 
@@ -602,6 +616,9 @@ tts_minimal_materialize(TupleTableSlot *slot)
 	MinimalTupleTableSlot *mslot = (MinimalTupleTableSlot *) slot;
 	MemoryContext oldContext;
 
+	/* see tts_virtual_materialize: carried detoasted copies must go */
+	ExecSlotResetDetoast(slot);
+
 	Assert(!TTS_EMPTY(slot));
 
 	/* If slot has its tuple already materialized, nothing to do. */
@@ -695,6 +712,9 @@ static void
 tts_minimal_store_tuple(TupleTableSlot *slot, MinimalTuple mtup, bool shouldFree)
 {
 	MinimalTupleTableSlot *mslot = (MinimalTupleTableSlot *) slot;
+
+	/* the slot moves on to another tuple; drop its detoasted copies */
+	ExecSlotResetDetoast(slot);
 
 	tts_minimal_clear(slot);
 
@@ -818,6 +838,9 @@ tts_buffer_heap_materialize(TupleTableSlot *slot)
 {
 	BufferHeapTupleTableSlot *bslot = (BufferHeapTupleTableSlot *) slot;
 	MemoryContext oldContext;
+
+	/* see tts_virtual_materialize: carried detoasted copies must go */
+	ExecSlotResetDetoast(slot);
 
 	Assert(!TTS_EMPTY(slot));
 
@@ -992,6 +1015,8 @@ tts_buffer_heap_store_tuple(TupleTableSlot *slot, HeapTuple tuple,
 		slot->tts_flags &= ~TTS_FLAG_SHOULDFREE;
 	}
 
+	/* every refill path, including copyslot, invalidates tts_values */
+	ExecSlotResetDetoast(slot);
 	slot->tts_flags &= ~TTS_FLAG_EMPTY;
 	slot->tts_nvalid = 0;
 	bslot->base.tuple = tuple;
@@ -1328,7 +1353,8 @@ const TupleTableSlotOps TTSOpsVirtual = {
 	.get_heap_tuple = NULL,
 	.get_minimal_tuple = NULL,
 	.copy_heap_tuple = tts_virtual_copy_heap_tuple,
-	.copy_minimal_tuple = tts_virtual_copy_minimal_tuple
+	.copy_minimal_tuple = tts_virtual_copy_minimal_tuple,
+	.resets_detoasted = true,
 };
 
 const TupleTableSlotOps TTSOpsHeapTuple = {
@@ -1346,7 +1372,8 @@ const TupleTableSlotOps TTSOpsHeapTuple = {
 	/* A heap tuple table slot can not "own" a minimal tuple. */
 	.get_minimal_tuple = NULL,
 	.copy_heap_tuple = tts_heap_copy_heap_tuple,
-	.copy_minimal_tuple = tts_heap_copy_minimal_tuple
+	.copy_minimal_tuple = tts_heap_copy_minimal_tuple,
+	.resets_detoasted = true,
 };
 
 const TupleTableSlotOps TTSOpsMinimalTuple = {
@@ -1364,7 +1391,8 @@ const TupleTableSlotOps TTSOpsMinimalTuple = {
 	.get_heap_tuple = NULL,
 	.get_minimal_tuple = tts_minimal_get_minimal_tuple,
 	.copy_heap_tuple = tts_minimal_copy_heap_tuple,
-	.copy_minimal_tuple = tts_minimal_copy_minimal_tuple
+	.copy_minimal_tuple = tts_minimal_copy_minimal_tuple,
+	.resets_detoasted = true,
 };
 
 const TupleTableSlotOps TTSOpsBufferHeapTuple = {
@@ -1382,7 +1410,8 @@ const TupleTableSlotOps TTSOpsBufferHeapTuple = {
 	/* A buffer heap tuple table slot can not "own" a minimal tuple. */
 	.get_minimal_tuple = NULL,
 	.copy_heap_tuple = tts_buffer_heap_copy_heap_tuple,
-	.copy_minimal_tuple = tts_buffer_heap_copy_minimal_tuple
+	.copy_minimal_tuple = tts_buffer_heap_copy_minimal_tuple,
+	.resets_detoasted = true,
 };
 
 
@@ -1513,6 +1542,11 @@ ExecResetTupleTable(List *tupleTable,	/* tuple table */
 		/* Always release resources and reset the slot to empty */
 		ExecClearTuple(slot);
 		slot->tts_ops->release(slot);
+		if (slot->tts_detoast_cxt)
+		{
+			MemoryContextDelete(slot->tts_detoast_cxt);
+			slot->tts_detoast_cxt = NULL;
+		}
 		if (slot->tts_tupleDescriptor)
 		{
 			ReleaseTupleDesc(slot->tts_tupleDescriptor);
@@ -1570,6 +1604,8 @@ ExecDropSingleTupleTableSlot(TupleTableSlot *slot)
 	Assert(IsA(slot, TupleTableSlot));
 	ExecClearTuple(slot);
 	slot->tts_ops->release(slot);
+	if (slot->tts_detoast_cxt)
+		MemoryContextDelete(slot->tts_detoast_cxt);
 	if (slot->tts_tupleDescriptor)
 		ReleaseTupleDesc(slot->tts_tupleDescriptor);
 	if (!TTS_FIXED(slot))
@@ -1865,6 +1901,16 @@ ExecForceStoreMinimalTuple(MinimalTuple mtup,
 			pfree(mtup);
 		}
 	}
+}
+
+/*
+ * Out-of-line part of ExecSlotResetDetoast(); see tuptable.h.
+ */
+void
+ExecResetSlotDetoastContext(TupleTableSlot *slot)
+{
+	MemoryContextReset(slot->tts_detoast_cxt);
+	slot->tts_detoasted = NULL;
 }
 
 /* --------------------------------

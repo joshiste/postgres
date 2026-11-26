@@ -4292,6 +4292,23 @@ supportfn(internal) returns internal
    </para>
 
    <para>
+    When an expression refers to a toasted column more than once, the
+    executor detoasts the column once per row and passes the detoasted value
+    to every function that takes the column as an argument
+    (see <xref linkend="guc-detoast-reuse"/>).  A target function that does
+    not simply detoast its argument can say so through a support function
+    that implements the <literal>SupportRequestArgRead</literal> request
+    type.  A function whose result depends on how the argument is stored,
+    as with <function>pg_column_size</function>, must do this to be passed
+    the stored datum.  A function that fetches only a slice of the argument
+    or only its size can do it to avoid having the whole value fetched on
+    its behalf.  Note that a function written in a procedural language
+    that passes its argument on to such a function cannot make use of
+    this: it receives the detoasted value when the column is referred to
+    elsewhere in the expression.
+   </para>
+
+   <para>
     For target functions that return <type>boolean</type>, it may be possible to
     convert a function call appearing in <literal>WHERE</literal> into an indexable operator
     clause or clauses.  The converted clauses might be exactly equivalent

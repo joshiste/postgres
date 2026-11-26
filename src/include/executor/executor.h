@@ -20,6 +20,7 @@
 #include "fmgr.h"
 #include "nodes/lockoptions.h"
 #include "nodes/parsenodes.h"
+#include "nodes/supportnodes.h"
 #include "utils/memutils.h"
 
 /* Avoid including access/transam.h here */
@@ -92,6 +93,12 @@ extern PGDLLIMPORT ExecutorFinish_hook_type ExecutorFinish_hook;
 /* Hook for plugins to get control in ExecutorEnd() */
 typedef void (*ExecutorEnd_hook_type) (QueryDesc *queryDesc);
 extern PGDLLIMPORT ExecutorEnd_hook_type ExecutorEnd_hook;
+
+extern ExprState *ExecInitExprArg(Expr *node, PlanState *parent);
+extern List *ExecInitFuncArgList(List *args, Oid funcid, Oid inputcollid,
+								 PlanState *parent);
+extern FuncArgRead ExecFuncArgRead(Oid funcid, List *args, int argno,
+								   Oid inputcollid);
 
 /* Hook for plugins to get control in ExecCheckPermissions() */
 typedef bool (*ExecutorCheckPerms_hook_type) (List *rangeTable,
